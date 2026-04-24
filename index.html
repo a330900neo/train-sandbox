@@ -1,44 +1,29 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Train Builder Sandbox</title>
-    <link rel="stylesheet" href="style.css">
-</head>
-<body>
-    <canvas id="gameCanvas"></canvas>
-    
-    <div id="toolbar">
-        <button id="tool-pan" class="active">Pan/Zoom</button>
-        <button id="tool-track">Build Track</button>
-        <button id="tool-platform">Build Platform</button>
-        <button id="tool-select">Select</button>
-        <button id="tool-multiselect">Multi-Select</button>
-        <div class="divider"></div>
-        <label><input type="checkbox" id="toggle-snap" checked> Snapping</label>
-        <div class="divider"></div>
-        <button id="btn-save">Save</button>
-        <button id="btn-load">Load</button>
-    </div>
+<div id="toolbar">
+    <button id="tool-pan" class="active">Pan/Zoom</button>
+    <button id="tool-track">Build Track</button>
+    <button id="tool-select">Select</button>
+    <div class="divider"></div>
+    <label><input type="checkbox" id="toggle-snap" checked> Snapping</label>
+    <div class="divider"></div>
+    <label>Routing: 
+        <select id="route-mode">
+            <option value="auto">Auto (Single Arc/Straight)</option>
+            <option value="biarc">Biarc (S-Curve)</option>
+            <option value="asa">Arc-Straight-Arc</option>
+        </select>
+    </label>
+    <label id="custom-radius-container" class="hidden"> Radius: 
+        <input type="number" id="custom-radius" value="500" step="10">
+    </label>
+    <div class="divider"></div>
+    <button id="btn-save">Save</button>
+</div>
 
-    <div id="build-ui" class="hidden overlay-panel bottom-center">
-        <div id="preview-data">Gradient: 0% | Elevation: 0m | Radius: 0m | Max Speed: 0 km/h</div>
-        <div class="controls">
-            <label>Height: <input type="number" id="height-input" value="0" step="1"></label>
-            <button id="btn-confirm" class="primary">Confirm Placement</button>
-            <button id="btn-cancel" class="danger">Cancel</button>
-        </div>
+<div id="build-ui" class="hidden overlay-panel bottom-center">
+    <div id="preview-data">Len: 0m | Grad: 0% | Elev: 0m | Rad: 0m | Spd: 0 km/h</div>
+    <div class="controls">
+        <label>Height: <input type="number" id="height-input" value="0" step="1"></label>
+        <button id="btn-confirm" class="primary">Confirm Placement</button>
+        <button id="btn-cancel" class="danger">Cancel</button>
     </div>
-
-    <div id="context-menu" class="hidden overlay-panel">
-        <div id="context-info"></div>
-        <button id="btn-delete">Delete</button>
-        <button id="btn-turnaround" class="hidden">Toggle Turn-Around</button>
-        <button id="btn-block" class="hidden">Toggle Block Section</button>
-        <button id="btn-close-context">Close</button>
-    </div>
-
-    <script type="module" src="js/main.js"></script>
-</body>
-</html>
+</div>
