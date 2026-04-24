@@ -3,7 +3,6 @@ body, html {
     margin: 0;
     padding: 0;
     overflow: hidden;
-    /* touch-action: none; <-- REMOVE THIS IF YOU HAVE IT */
 }
 
 /* Good: Only stops browser zooming on the canvas */
@@ -17,11 +16,23 @@ body, html {
     z-index: 1; /* Push canvas to the background */
 }
 
+/* FIXED: Added z-index, pointer-events, and touch-action */
 #toolbar {
-    position: absolute; top: 10px; left: 10px; right: 10px;
-    background: rgba(30, 30, 30, 0.9); padding: 10px;
-    border-radius: 8px; display: flex; gap: 8px; flex-wrap: wrap;
-    box-shadow: 0 4px 6px rgba(0,0,0,0.5); color: white;
+    position: absolute; 
+    top: 10px; 
+    left: 10px; 
+    right: 10px;
+    background: rgba(30, 30, 30, 0.9); 
+    padding: 10px;
+    border-radius: 8px; 
+    display: flex; 
+    gap: 8px; 
+    flex-wrap: wrap;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.5); 
+    color: white;
+    z-index: 9999; /* Forces toolbar above canvas */
+    pointer-events: auto; 
+    touch-action: auto; /* Allows native mobile dropdowns */
 }
 
 button {
@@ -37,50 +48,39 @@ button:hover { filter: brightness(1.2); }
 
 .divider { width: 1px; background: #555; margin: 0 5px; }
 
-.overlay-panel {
-    position: absolute; background: rgba(30, 30, 30, 0.95);
-    padding: 15px; border-radius: 8px; color: white;
-    box-shadow: 0 4px 10px rgba(0,0,0,0.7); border: 1px solid #444;
+/* FIXED: Merged duplicate rules and added touch-action */
+.overlay-panel, #build-ui {
+    position: absolute; 
+    background: rgba(30, 30, 30, 0.95);
+    padding: 15px; 
+    border-radius: 8px; 
+    color: white;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.7); 
+    border: 1px solid #444;
+    z-index: 9999; /* Forces UI above canvas */
+    pointer-events: auto; 
+    touch-action: auto; /* Allows native mobile dropdowns */
 }
 
-.bottom-center {
-    bottom: 20px; left: 50%; transform: translateX(-50%);
-    display: flex; flex-direction: column; gap: 10px; align-items: center;
+/* Bottom positioning for #build-ui / .bottom-center */
+#build-ui, .bottom-center {
+    bottom: 20px; 
+    left: 50%; 
+    transform: translateX(-50%);
+    display: flex; 
+    flex-direction: column; 
+    gap: 10px; 
+    align-items: center;
 }
 
 .hidden { display: none !important; }
 
 #preview-data { font-family: monospace; font-size: 14px; color: #aaa; }
 .controls { display: flex; gap: 10px; align-items: center; }
-input[type="number"] { width: 60px; padding: 5px; background: #222; color: white; border: 1px solid #555; }
-.overlay-panel {
-    position: absolute;
-    background: rgba(0, 0, 0, 0.85);
-    color: white;
-    padding: 10px;
-    border-radius: 8px;
-    z-index: 1000; /* Forces UI to the very top */
-    pointer-events: auto; /* Guarantees buttons and dropdowns are clickable */
-    box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-}
-
-#build-ui {
-    bottom: 20px;
-    left: 50%;
-    transform: translateX(-50%);
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    align-items: center;
-}
-
-#build-ui, .overlay-panel {
-    position: absolute; /* or fixed */
-    z-index: 9999; /* Force it above everything */
-    pointer-events: auto; /* Tell the browser this can be clicked */
-    
-    /* Example positioning */
-    bottom: 20px;
-    left: 50%;
-    transform: translateX(-50%);
+input[type="number"], select { 
+    width: auto; 
+    padding: 5px; 
+    background: #222; 
+    color: white; 
+    border: 1px solid #555; 
 }
