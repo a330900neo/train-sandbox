@@ -17,31 +17,39 @@ export class Renderer {
     draw() {
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-        // Sort tracks by height layer (z-index essentially)
         const sortedTracks = [...state.tracks].sort((a, b) => a.h - b.h);
 
         for (let track of sortedTracks) {
-            this.drawTrackSegment(track, false);
+            this.drawTrack(track, false);
         }
 
         if (this.builder.previewTrack && state.currentTool === 'track') {
             this.ctx.globalAlpha = 0.5;
-            this.drawTrackSegment(this.builder.previewTrack, true);
+            this.drawTrack(this.builder.previewTrack, true);
             this.ctx.globalAlpha = 1.0;
             this.drawHandles();
         }
 
-        // Draw selection highlights
         for (let track of state.selection) {
             this.drawHighlight(track);
         }
+
+        // Optional: Draw intersection nodes for debugging/visibility
+        if (state.currentTool === 'track' && this.builder.snapEnabled) {
+            this.ctx.fillStyle = 'rgba(0, 255, 255, 0.5)';
+            for (let pt of state.intersections) {
+                const sp = this.camera.worldToScreen(pt.x, pt.y);
+                this.ctx.beginPath(); this.ctx.arc(sp.x, sp.y, 4, 0, Math.PI*2); this.ctx.fill();
+            }
+        }
     }
 
-    drawTrackSegment(geom, isPreview) {
+    drawTrack(trackData, isPreview) {
         this.ctx.save();
         
-        // 1. Gray Base
-        this.setupPath(geom);
+        // 1. Gray Base (Iterate through segments)
+        this.ctx.beginPath();
+        trackData.segments.forEach(seg => this.setupPath(seg));
         this.ctx.strokeStyle = isPreview ? '#888' : '#666';
         this.ctx.lineWidth = TRACK_WIDTH * this.camera.zoom;
         this.ctx.lineCap = 'butt';
@@ -50,17 +58,19 @@ export class Renderer {
         // 2. Rails
         this.ctx.strokeStyle = '#ccc';
         this.ctx.lineWidth = 0.2 * this.camera.zoom;
+        
+        this.ctx.beginPath();
+        trackData.segments.forEach(seg => this.drawOffsetRail(seg, GAUGE / 2));
+        this.ctx.stroke();
 
-        // Offset path for left rail
-        this.drawOffsetRail(geom, GAUGE / 2);
-        // Offset path for right rail
-        this.drawOffsetRail(geom, -GAUGE / 2);
+        this.ctx.beginPath();
+        trackData.segments.forEach(seg => this.drawOffsetRail(seg, -GAUGE / 2));
+        this.ctx.stroke();
 
         this.ctx.restore();
     }
 
     setupPath(geom) {
-        this.ctx.beginPath();
         const p1 = this.camera.worldToScreen(geom.p1.x, geom.p1.y);
         if (geom.type === 'straight') {
             const p2 = this.camera.worldToScreen(geom.p2.x, geom.p2.y);
@@ -73,24 +83,19 @@ export class Renderer {
     }
 
     drawOffsetRail(geom, offset) {
-        this.ctx.beginPath();
         if (geom.type === 'straight') {
-            // Calculate normal
             const angle = Math.atan2(geom.p2.y - geom.p1.y, geom.p2.x - geom.p1.x);
             const nx = -Math.sin(angle) * offset;
             const ny = Math.cos(angle) * offset;
-            
             const p1 = this.camera.worldToScreen(geom.p1.x + nx, geom.p1.y + ny);
             const p2 = this.camera.worldToScreen(geom.p2.x + nx, geom.p2.y + ny);
             this.ctx.moveTo(p1.x, p1.y);
             this.ctx.lineTo(p2.x, p2.y);
         } else if (geom.type === 'arc') {
             const c = this.camera.worldToScreen(geom.center.x, geom.center.y);
-            // If ccw, positive offset is outer rail. 
             const railRadius = geom.radius + (geom.ccw ? -offset : offset);
             this.ctx.arc(c.x, c.y, railRadius * this.camera.zoom, geom.startAngle, geom.endAngle, !geom.ccw);
         }
-        this.ctx.stroke();
     }
 
     drawHandles() {
@@ -105,9 +110,10 @@ export class Renderer {
         this.ctx.beginPath(); this.ctx.arc(e.x, e.y, 8, 0, Math.PI * 2); this.ctx.fill();
     }
 
-    drawHighlight(geom) {
+    drawHighlight(trackData) {
         this.ctx.save();
-        this.setupPath(geom);
+        this.ctx.beginPath();
+        trackData.segments.forEach(seg => this.setupPath(seg));
         this.ctx.strokeStyle = 'rgba(255, 255, 0, 0.5)';
         this.ctx.lineWidth = (TRACK_WIDTH + 1) * this.camera.zoom;
         this.ctx.stroke();
