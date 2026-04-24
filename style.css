@@ -1,18 +1,20 @@
+/* Make sure you DON'T have touch-action: none here */
 body, html {
-    margin: 0; padding: 0; width: 100%; height: 100%;
-    overflow: hidden; background-color: #1a1a1a;
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    user-select: none; /* Prevent text selection on mobile */
-    -webkit-user-select: none;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    /* touch-action: none; <-- REMOVE THIS IF YOU HAVE IT */
 }
 
+/* Good: Only stops browser zooming on the canvas */
 #gameCanvas {
-    display: block;
+    position: absolute;
+    top: 0;
+    left: 0;
     width: 100vw;
     height: 100vh;
-    touch-action: none; /* CRITICAL: Allows JS to handle pinch-zoom instead of the browser */
-    -webkit-user-select: none;
-    user-select: none;
+    touch-action: none; 
+    z-index: 1; /* Push canvas to the background */
 }
 
 #toolbar {
@@ -70,4 +72,15 @@ input[type="number"] { width: 60px; padding: 5px; background: #222; color: white
     flex-direction: column;
     gap: 10px;
     align-items: center;
+}
+
+#build-ui, .overlay-panel {
+    position: absolute; /* or fixed */
+    z-index: 9999; /* Force it above everything */
+    pointer-events: auto; /* Tell the browser this can be clicked */
+    
+    /* Example positioning */
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
 }
