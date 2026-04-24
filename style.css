@@ -91,3 +91,14 @@ select, input {
     -webkit-user-select: auto !important;
     user-select: auto !important;
 }
+
+/* Force the dropdown to behave normally on mobile */
+select#conn-mode {
+    position: relative;
+    z-index: 10000 !important;
+    pointer-events: auto !important;
+    touch-action: manipulation !important; /* Tells mobile to allow normal taps */
+    -webkit-user-select: auto !important;
+    user-select: auto !important;
+    appearance: auto !important; /* Forces standard browser UI */
+}
