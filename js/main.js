@@ -1,61 +1,6 @@
-import { Camera } from './camera.js';
-import { state } from './state.js';
-import { Builder } from './builder.js';
-import { Renderer } from './renderer.js';
-import { getMaxSpeed } from './math.js';
-
-const canvas = document.getElementById('gameCanvas');
-const camera = new Camera();
-const builder = new Builder();
-const renderer = new Renderer(canvas, camera, builder);
-
-// UI Elements
-const buildUI = document.getElementById('build-ui');
-const previewData = document.getElementById('preview-data');
-const contextMenu = document.getElementById('context-menu');
-const connMode = document.getElementById('conn-mode');
-const connRadius = document.getElementById('conn-radius');
-const radiusContainer = document.getElementById('radius-container');
-
-function init() {
-    window.addEventListener('resize', () => renderer.resize());
-    renderer.resize();
-
-    setupTools();
-    setupInputs();
-    setupMenus();
-
-    // The game loop will now properly start since setupMenus won't crash!
-    requestAnimationFrame(gameLoop);
-}
-
-function setupTools() {
-    const tools = ['pan', 'track', 'platform', 'select', 'multiselect'];
-    tools.forEach(tool => {
-        document.getElementById(`tool-${tool}`).addEventListener('click', (e) => {
-            tools.forEach(t => document.getElementById(`tool-${t}`).classList.remove('active'));
-            e.target.classList.add('active');
-            state.currentTool = tool;
-            
-            if (tool === 'track') {
-                const center = camera.screenToWorld(window.innerWidth/2, window.innerHeight/2);
-                builder.startPreview(center.x, center.y);
-                buildUI.classList.remove('hidden');
-                updatePreviewText(); // Force text update immediately
-            } else {
-                buildUI.classList.add('hidden');
-                builder.cancel();
-            }
-        });
-    });
-
-    document.getElementById('toggle-snap').addEventListener('change', (e) => {
-        builder.snapEnabled = e.target.checked;
-    });
-}
-
 function setupInputs() {
     let pointers = [];
+    let initialPinchDist = null;
 
     canvas.addEventListener('pointerdown', (e) => {
         pointers.push(e);
@@ -77,8 +22,22 @@ function setupInputs() {
         if (index !== -1) pointers[index] = e;
 
         if (pointers.length === 2) {
-            // Mobile Pinch Zoom Placeholder
+            // MOBILE PINCH ZOOM LOGIC
+            const dx = pointers[0].clientX - pointers[1].clientX;
+            const dy = pointers[0].clientY - pointers[1].clientY;
+            const currentPinchDist = Math.hypot(dx, dy);
+            const centerX = (pointers[0].clientX + pointers[1].clientX) / 2;
+            const centerY = (pointers[0].clientY + pointers[1].clientY) / 2;
+
+            if (initialPinchDist) {
+                const scaleFactor = initialPinchDist / currentPinchDist;
+                camera.handlePinchZoom(scaleFactor, centerX, centerY);
+            }
+            
+            initialPinchDist = currentPinchDist;
         } else {
+            initialPinchDist = null; // Reset pinch when fingers lift
+            
             const worldPt = camera.screenToWorld(e.clientX, e.clientY);
             if (builder.isDraggingHandle) {
                 builder.handlePointerMove(worldPt);
@@ -91,6 +50,16 @@ function setupInputs() {
 
     canvas.addEventListener('pointerup', (e) => {
         pointers = pointers.filter(p => p.pointerId !== e.pointerId);
+        if (pointers.length < 2) initialPinchDist = null;
+        
+        builder.handlePointerUp();
+        camera.handlePanEnd();
+    });
+
+    // To prevent touch from canceling unexpectedly on some mobile browsers
+    canvas.addEventListener('pointercancel', (e) => {
+        pointers = pointers.filter(p => p.pointerId !== e.pointerId);
+        initialPinchDist = null;
         builder.handlePointerUp();
         camera.handlePanEnd();
     });
@@ -99,99 +68,3 @@ function setupInputs() {
         camera.handleZoom(e.deltaY, e.clientX, e.clientY);
     });
 }
-
-function setupMenus() {
-    document.getElementById('btn-confirm').addEventListener('click', () => builder.confirm());
-    document.getElementById('btn-cancel').addEventListener('click', () => {
-        document.getElementById('tool-pan').click(); 
-    });
-
-    document.getElementById('btn-save').addEventListener('click', () => state.save());
-    document.getElementById('btn-load').addEventListener('click', () => state.load());
-    
-    document.getElementById('btn-close-context').addEventListener('click', () => {
-        contextMenu.classList.add('hidden');
-        state.selection = [];
-    });
-    
-    document.getElementById('btn-delete').addEventListener('click', () => {
-        const ids = state.selection.map(t => t.id);
-        state.tracks = state.tracks.filter(t => !ids.includes(t.id));
-        state.computeIntersections(); // Refresh intersection snapping points
-        state.selection = [];
-        contextMenu.classList.add('hidden');
-    });
-
-    // Advanced Track Connections
-    connMode.addEventListener('change', (e) => {
-        builder.mode = e.target.value;
-        if (e.target.value === 'arclinearc') {
-            radiusContainer.classList.remove('hidden');
-        } else {
-            radiusContainer.classList.add('hidden');
-        }
-        builder.updatePreview();
-        updatePreviewText();
-    });
-
-    connRadius.addEventListener('input', (e) => {
-        builder.customRadius = parseFloat(e.target.value) || 500;
-        builder.updatePreview();
-        updatePreviewText();
-    });
-}
-
-function updatePreviewText() {
-    const pt = builder.previewTrack;
-    if (!pt) return;
-    
-    const speed = getMaxSpeed(pt.radius);
-    const radiusText = pt.radius === Infinity ? 'Straight' : `${Math.round(pt.radius)}m`;
-    const lengthText = `${Math.round(pt.totalLength)}m`;
-    
-    previewData.innerText = `Len: ${lengthText} | Grad: 0% | Elev: ${builder.startP.h}m | Rad: ${radiusText} | Max: ${speed} km/h`;
-}
-
-function handleSelection(worldPt) {
-    const clickThreshold = 5 / camera.zoom; 
-    
-    // Check all segments within the compound track
-    let hit = state.tracks.find(track => {
-        return track.segments.some(seg => {
-            const mid = { x: (seg.p1.x + seg.p2.x)/2, y: (seg.p1.y + seg.p2.y)/2 };
-            return Math.hypot(worldPt.x - mid.x, worldPt.y - mid.y) < clickThreshold * 5;
-        });
-    });
-
-    if (hit) {
-        if (state.currentTool === 'select') state.selection = [hit];
-        else if (state.currentTool === 'multiselect') state.selection.push(hit);
-        showContextMenu();
-    } else {
-        state.selection = [];
-        contextMenu.classList.add('hidden');
-    }
-}
-
-function showContextMenu() {
-    contextMenu.classList.remove('hidden');
-    const info = document.getElementById('context-info');
-    if (state.selection.length === 1) {
-        const t = state.selection[0];
-        const spd = getMaxSpeed(t.radius);
-        info.innerText = `Segments: ${t.segments.length} | Len: ${Math.round(t.totalLength)}m | Max Spd: ${spd}km/h`;
-        document.getElementById('btn-turnaround').classList.add('hidden');
-        document.getElementById('btn-block').classList.add('hidden');
-    } else {
-        info.innerText = `${state.selection.length} Tracks Selected`;
-        document.getElementById('btn-turnaround').classList.remove('hidden');
-        document.getElementById('btn-block').classList.remove('hidden');
-    }
-}
-
-function gameLoop() {
-    renderer.draw();
-    requestAnimationFrame(gameLoop);
-}
-
-init();
