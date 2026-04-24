@@ -1,11 +1,10 @@
 export const GAUGE = 1.435;
 export const TRACK_WIDTH = 3.2;
-export const PARALLEL_SPACING = 5.0; // 5 meters between parallel tracks
-export const STRAIGHT_RADIUS_THRESHOLD = 50000;
+export const PARALLEL_SPACING = 5.0; 
+export const STRAIGHT_RADIUS_THRESHOLD = 20000; // Updated to 20000m
 
 export function dist(p1, p2) { return Math.hypot(p2.x - p1.x, p2.y - p1.y); }
 
-// Generates a single arc or straight segment
 function createSegment(p1, dir1, p2) {
     const d = dist(p1, p2);
     if (d < 0.1) return null;
@@ -42,22 +41,16 @@ function createSegment(p1, dir1, p2) {
     return { type: 'arc', p1, p2, center: { x: cx, y: cy }, radius, startAngle, endAngle, ccw, length, startDir: dir1, endDir };
 }
 
-// Main Geometry Router
 export function calculateTrackGeometry(p1, dir1, p2, dir2, mode, customRadius) {
     let segments = [];
     
     if (mode === 'auto' || dir2 === null) {
-        // Free dragging or single arc mode
         const seg = createSegment(p1, dir1, p2);
         if (seg) segments.push(seg);
     } 
     else if (mode === 'biarc') {
-        // Simplified Biarc: Create a midpoint knot to smooth two directions
-        // (Full robust biarc solver is complex; we approximate by blending intersections)
         const midX = (p1.x + p2.x) / 2;
         const midY = (p1.y + p2.y) / 2;
-        const midDir = Math.atan2(p2.y - p1.y, p2.x - p1.x); // Average direction
-        
         const seg1 = createSegment(p1, dir1, {x: midX, y: midY});
         if (seg1) {
             const seg2 = createSegment({x: midX, y: midY}, seg1.endDir, p2);
@@ -65,10 +58,6 @@ export function calculateTrackGeometry(p1, dir1, p2, dir2, mode, customRadius) {
         }
     }
     else if (mode === 'arclinearc') {
-        // Simplification for sandbox: Uses the requested radius to form a tangent line
-        // Finding exact inner/outer tangents between two circles is heavy, 
-        // fallback to creating a straight line and filleting the corners.
-        // For demonstration, we simulate the geometry.
         const d = dist(p1, p2);
         const midPt = { x: p1.x + Math.cos(dir1)*(d/3), y: p1.y + Math.sin(dir1)*(d/3) };
         const seg1 = createSegment(p1, dir1, midPt);
@@ -85,12 +74,7 @@ export function calculateTrackGeometry(p1, dir1, p2, dir2, mode, customRadius) {
     const totalLength = segments.reduce((sum, s) => sum + s.length, 0);
     const minRadius = Math.min(...segments.map(s => s.radius));
 
-    return { 
-        segments, 
-        totalLength, 
-        radius: minRadius, 
-        endDir: segments[segments.length-1].endDir 
-    };
+    return { segments, totalLength, radius: minRadius, endDir: segments[segments.length-1].endDir };
 }
 
 export function getMaxSpeed(radius) {
@@ -99,11 +83,18 @@ export function getMaxSpeed(radius) {
     return Math.min(350, Math.round(speed));
 }
 
-// Project point onto a line segment (For Parallel Snapping)
+// Project point onto a line segment
 export function projectPointToSegment(px, py, x1, y1, x2, y2) {
     const l2 = (x2 - x1) ** 2 + (y2 - y1) ** 2;
     if (l2 === 0) return { x: x1, y: y1, t: 0 };
     let t = ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / l2;
     t = Math.max(0, Math.min(1, t));
     return { x: x1 + t * (x2 - x1), y: y1 + t * (y2 - y1), t };
+}
+
+// Get distance and angle from a point to an arc center
+export function projectPointToArc(px, py, center, radius) {
+    const distFromCenter = dist({x: px, y: py}, center);
+    const angle = Math.atan2(py - center.y, px - center.x);
+    return { distFromCenter, angle };
 }
