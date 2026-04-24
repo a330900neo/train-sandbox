@@ -84,3 +84,10 @@ input[type="number"], select {
     color: white; 
     border: 1px solid #555; 
 }
+
+select, input {
+    pointer-events: auto !important;
+    touch-action: auto !important;
+    -webkit-user-select: auto !important;
+    user-select: auto !important;
+}
