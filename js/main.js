@@ -25,6 +25,7 @@ function init() {
     setupInputs();
     setupMenus();
 
+    // The game loop will now properly start since setupMenus won't crash!
     requestAnimationFrame(gameLoop);
 }
 
@@ -32,18 +33,15 @@ function setupTools() {
     const tools = ['pan', 'track', 'platform', 'select', 'multiselect'];
     tools.forEach(tool => {
         document.getElementById(`tool-${tool}`).addEventListener('click', (e) => {
-            // Update active button state
             tools.forEach(t => document.getElementById(`tool-${t}`).classList.remove('active'));
             e.target.classList.add('active');
-            
             state.currentTool = tool;
             
-            // Toggle appropriate UI overlays
             if (tool === 'track') {
                 const center = camera.screenToWorld(window.innerWidth/2, window.innerHeight/2);
                 builder.startPreview(center.x, center.y);
                 buildUI.classList.remove('hidden');
-                contextMenu.classList.add('hidden');
+                updatePreviewText(); // Force text update immediately
             } else {
                 buildUI.classList.add('hidden');
                 builder.cancel();
@@ -79,7 +77,7 @@ function setupInputs() {
         if (index !== -1) pointers[index] = e;
 
         if (pointers.length === 2) {
-            // Pinch zoom placeholder for mobile multi-touch
+            // Mobile Pinch Zoom Placeholder
         } else {
             const worldPt = camera.screenToWorld(e.clientX, e.clientY);
             if (builder.isDraggingHandle) {
@@ -103,17 +101,14 @@ function setupInputs() {
 }
 
 function setupMenus() {
-    // Build Confirm/Cancel
     document.getElementById('btn-confirm').addEventListener('click', () => builder.confirm());
     document.getElementById('btn-cancel').addEventListener('click', () => {
-        document.getElementById('tool-pan').click(); // Revert to pan
+        document.getElementById('tool-pan').click(); 
     });
 
-    // Save/Load
     document.getElementById('btn-save').addEventListener('click', () => state.save());
     document.getElementById('btn-load').addEventListener('click', () => state.load());
     
-    // Context Menu Controls
     document.getElementById('btn-close-context').addEventListener('click', () => {
         contextMenu.classList.add('hidden');
         state.selection = [];
@@ -122,12 +117,12 @@ function setupMenus() {
     document.getElementById('btn-delete').addEventListener('click', () => {
         const ids = state.selection.map(t => t.id);
         state.tracks = state.tracks.filter(t => !ids.includes(t.id));
+        state.computeIntersections(); // Refresh intersection snapping points
         state.selection = [];
         contextMenu.classList.add('hidden');
-        if(state.computeIntersections) state.computeIntersections();
     });
 
-    // Track Connection Modes
+    // Advanced Track Connections
     connMode.addEventListener('change', (e) => {
         builder.mode = e.target.value;
         if (e.target.value === 'arclinearc') {
@@ -136,11 +131,13 @@ function setupMenus() {
             radiusContainer.classList.add('hidden');
         }
         builder.updatePreview();
+        updatePreviewText();
     });
 
     connRadius.addEventListener('input', (e) => {
         builder.customRadius = parseFloat(e.target.value) || 500;
         builder.updatePreview();
+        updatePreviewText();
     });
 }
 
@@ -150,7 +147,7 @@ function updatePreviewText() {
     
     const speed = getMaxSpeed(pt.radius);
     const radiusText = pt.radius === Infinity ? 'Straight' : `${Math.round(pt.radius)}m`;
-    const lengthText = `${Math.round(pt.totalLength || 0)}m`;
+    const lengthText = `${Math.round(pt.totalLength)}m`;
     
     previewData.innerText = `Len: ${lengthText} | Grad: 0% | Elev: ${builder.startP.h}m | Rad: ${radiusText} | Max: ${speed} km/h`;
 }
@@ -158,11 +155,12 @@ function updatePreviewText() {
 function handleSelection(worldPt) {
     const clickThreshold = 5 / camera.zoom; 
     
-    let hit = state.tracks.find(t => {
-        if (!t.segments || t.segments.length === 0) return false;
-        // Check proximity to the start of the first segment
-        const mid = { x: (t.segments[0].p1.x + t.segments[0].p2.x)/2, y: (t.segments[0].p1.y + t.segments[0].p2.y)/2 };
-        return Math.hypot(worldPt.x - mid.x, worldPt.y - mid.y) < clickThreshold * 10;
+    // Check all segments within the compound track
+    let hit = state.tracks.find(track => {
+        return track.segments.some(seg => {
+            const mid = { x: (seg.p1.x + seg.p2.x)/2, y: (seg.p1.y + seg.p2.y)/2 };
+            return Math.hypot(worldPt.x - mid.x, worldPt.y - mid.y) < clickThreshold * 5;
+        });
     });
 
     if (hit) {
@@ -178,11 +176,10 @@ function handleSelection(worldPt) {
 function showContextMenu() {
     contextMenu.classList.remove('hidden');
     const info = document.getElementById('context-info');
-    
     if (state.selection.length === 1) {
         const t = state.selection[0];
         const spd = getMaxSpeed(t.radius);
-        info.innerText = `Length: ${Math.round(t.totalLength || 0)}m | Max Spd: ${spd}km/h`;
+        info.innerText = `Segments: ${t.segments.length} | Len: ${Math.round(t.totalLength)}m | Max Spd: ${spd}km/h`;
         document.getElementById('btn-turnaround').classList.add('hidden');
         document.getElementById('btn-block').classList.add('hidden');
     } else {
