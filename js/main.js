@@ -1,16 +1,33 @@
 function setupInputs() {
     let pointers = [];
     let initialPinchDist = null;
-     // Stop touches on the dropdown menu from bleeding into the game
-    const connMode = document.getElementById('connMode'); // Ensure this matches your <select> ID
 
-    if (connMode) {
-      connMode.addEventListener('pointerdown', (e) => e.stopPropagation());
-      connMode.addEventListener('touchstart', (e) => e.stopPropagation());
+    // --- CRITICAL UI PROTECTION ---
+    // Grabbing the correct IDs from your HTML!
+    const buildUI = document.getElementById('build-ui');
+    const toolbar = document.getElementById('toolbar');
+
+    function protectUI(e) {
+        e.stopPropagation(); // Stops the canvas from stealing the tap
     }
 
+    // Protect the bottom panel (dropdowns, radius input, confirm/cancel)
+    if (buildUI) {
+        buildUI.addEventListener('pointerdown', protectUI);
+        buildUI.addEventListener('touchstart', protectUI);
+        buildUI.addEventListener('wheel', protectUI);
+    }
+
+    // Protect the top toolbar (buttons, save/load, snap checkbox)
+    if (toolbar) {
+        toolbar.addEventListener('pointerdown', protectUI);
+        toolbar.addEventListener('touchstart', protectUI);
+        toolbar.addEventListener('wheel', protectUI);
+    }
+    // ------------------------------
+
     canvas.addEventListener('pointerdown', (e) => {
-        // CRITICAL: Force the canvas to track this finger even if it slides slightly off-screen
+        // Force the canvas to track this finger even if it slides slightly off-screen
         canvas.setPointerCapture(e.pointerId); 
         
         // Prevent duplicate pointers in the array just in case
@@ -72,7 +89,11 @@ function setupInputs() {
     // Unified function to handle lifting a finger or losing tracking
     const handlePointerEnd = (e) => {
         pointers = pointers.filter(p => p.pointerId !== e.pointerId);
-        canvas.releasePointerCapture(e.pointerId);
+        
+        // Safety check to ensure the element is still captured before releasing
+        if (canvas.hasPointerCapture(e.pointerId)) {
+            canvas.releasePointerCapture(e.pointerId);
+        }
         
         if (pointers.length < 2) {
             initialPinchDist = null;
