@@ -1,37 +1,48 @@
 import { state } from './state.js';
-import { 
-    dist, calculateTrackGeometry, calculateBiarc, calculateArcStraightArc, 
-    projectPointOntoTrack, getLineIntersection, PARALLEL_SPACING 
-} from './math.js';
+import { dist, calculateTrackGeometry, PARALLEL_SPACING, projectPointToSegment } from './math.js';
 
 export class Builder {
     constructor() {
-        this.previewTracks = []; // Now an array to support multi-segment modes (Biarc)
+        this.previewTrack = null;
         this.isDraggingHandle = false;
         this.activeHandle = null;
         this.snapEnabled = true;
-        this.routeMode = 'auto'; // auto, biarc, asa
+        this.mode = 'auto'; // auto, biarc, arclinearc
         this.customRadius = 500;
         
         this.startP = { x: 0, y: 0, dir: 0, h: 0 };
-        this.endP = { x: 50, y: 50, dir: Math.PI, h: 0 }; // End now has a direction for Biarcs
+        this.endP = { x: 50, y: 50, dir: null, h: 0 }; // dir is null unless snapped
     }
 
     startPreview(worldX, worldY) {
         this.startP = { x: worldX, y: worldY, dir: 0, h: 0 };
-        this.endP = { x: worldX + 50, y: worldY + 50, dir: Math.PI, h: 0 };
+        this.endP = { x: worldX + 50, y: worldY + 50, dir: null, h: 0 };
         this.updatePreview();
     }
 
     updatePreview() {
-        if (this.routeMode === 'biarc') {
-            this.previewTracks = calculateBiarc(this.startP, this.startP.dir, this.endP, this.endP.dir);
-        } else if (this.routeMode === 'asa') {
-            this.previewTracks = calculateArcStraightArc(this.startP, this.startP.dir, this.endP, this.endP.dir, this.customRadius);
-        } else {
-            const single = calculateTrackGeometry(this.startP, this.startP.dir, this.endP);
-            this.previewTracks = single ? [single] : [];
+        this.previewTrack = calculateTrackGeometry(
+            this.startP, this.startP.dir, 
+            this.endP, this.endP.dir, 
+            this.mode, this.customRadius
+        );
+        if (this.previewTrack) this.previewTrack.h = this.startP.h;
+    }
+
+    handlePointerDown(worldPt) {
+        if (this.previewTrack) {
+            if (dist(worldPt, this.startP) < 10) {
+                this.isDraggingHandle = true;
+                this.activeHandle = 'start';
+                return true;
+            }
+            if (dist(worldPt, this.endP) < 10) {
+                this.isDraggingHandle = true;
+                this.activeHandle = 'end';
+                return true;
+            }
         }
+        return false;
     }
 
     handlePointerMove(worldPt) {
@@ -41,61 +52,67 @@ export class Builder {
         let snappedDir = null;
 
         if (this.snapEnabled) {
-            const snapDist = 10;
-            let bestSnapDistance = snapDist;
+            const snapDist = 8;
+            let snapped = false;
 
+            // 1. Snap to Start/End points
             for (let track of state.tracks) {
-                // 1. Snap to Endpoints (Start/Merge)
-                if (dist(worldPt, track.p1) < bestSnapDistance) {
-                    target = { ...track.p1 };
-                    snappedDir = track.dir1 || 0;
-                    bestSnapDistance = dist(worldPt, track.p1);
-                }
-                if (dist(worldPt, track.p2) < bestSnapDistance) {
-                    target = { ...track.p2 };
-                    snappedDir = track.endDir || 0;
-                    bestSnapDistance = dist(worldPt, track.p2);
-                }
+                const first = track.segments[0];
+                const last = track.segments[track.segments.length - 1];
 
-                // 2. Parallel Track Snapping & Curve Detents
-                const proj = projectPointOntoTrack(worldPt, track);
-                if (proj && proj.distance > 0) {
-                    // Check if we are near a multiple of parallel spacing (e.g., 5m)
-                    const offsetIndex = Math.round(proj.distance / PARALLEL_SPACING);
-                    const idealDist = offsetIndex * PARALLEL_SPACING;
-                    
-                    if (Math.abs(proj.distance - idealDist) < snapDist / 2 && offsetIndex > 0) {
-                        // We are in parallel snap range!
-                        target = {
-                            x: proj.x + proj.nx * idealDist * Math.sign(worldPt.x - proj.x),
-                            y: proj.y + proj.ny * idealDist * Math.sign(worldPt.y - proj.y)
-                        };
-                        
-                        // Detent: If near start/end of curve (t=0 or t=1)
-                        if (proj.t < 0.05 || proj.t > 0.95) {
-                            // Lock exactly to the curve change
-                            // (Implementation requires strict normal alignment from the exact endpoint)
-                        }
+                if (dist(worldPt, first.p1) < snapDist) {
+                    target = { ...first.p1 };
+                    snappedDir = first.startDir;
+                    snapped = true; break;
+                }
+                if (dist(worldPt, last.p2) < snapDist) {
+                    target = { ...last.p2 };
+                    snappedDir = last.endDir;
+                    snapped = true; break;
+                }
+            }
+
+            // 2. Snap to Intersections
+            if (!snapped) {
+                for (let pt of state.intersections) {
+                    if (dist(worldPt, pt) < snapDist) {
+                        target = { ...pt };
+                        snapped = true; break;
                     }
                 }
             }
 
-            // 3. Snap to Intersections (Crossings)
-            for (let i = 0; i < state.tracks.length; i++) {
-                for (let j = i + 1; j < state.tracks.length; j++) {
-                    const t1 = state.tracks[i];
-                    const t2 = state.tracks[j];
-                    if (t1.type === 'straight' && t2.type === 'straight') {
-                        const intersect = getLineIntersection(t1.p1, t1.p2, t2.p1, t2.p2);
-                        if (intersect && dist(worldPt, intersect) < snapDist) {
-                            target = intersect;
+            // 3. Parallel Tracking & Curve Detents
+            if (!snapped) {
+                for (let track of state.tracks) {
+                    for (let seg of track.segments) {
+                        if (seg.type === 'straight') {
+                            const proj = projectPointToSegment(worldPt.x, worldPt.y, seg.p1.x, seg.p1.y, seg.p2.x, seg.p2.y);
+                            const d = dist(worldPt, proj);
+                            
+                            // If close to parallel offset (e.g., 5m)
+                            if (Math.abs(d - PARALLEL_SPACING) < 2) {
+                                // Normal vector
+                                const angle = Math.atan2(seg.p2.y - seg.p1.y, seg.p2.x - seg.p1.x);
+                                const nx = -Math.sin(angle);
+                                const ny = Math.cos(angle);
+                                
+                                // Curve Detent (Start/End synchronization)
+                                if (proj.t < 0.05) { target = { x: seg.p1.x + nx*PARALLEL_SPACING, y: seg.p1.y + ny*PARALLEL_SPACING }; }
+                                else if (proj.t > 0.95) { target = { x: seg.p2.x + nx*PARALLEL_SPACING, y: seg.p2.y + ny*PARALLEL_SPACING }; }
+                                else { target = { x: proj.x + nx*PARALLEL_SPACING, y: proj.y + ny*PARALLEL_SPACING }; }
+                                
+                                snappedDir = angle; // Inherit parallel direction
+                                snapped = true; break;
+                            }
                         }
+                        // Note: Parallel projection for arcs requires projecting to the arc center.
                     }
+                    if(snapped) break;
                 }
             }
         }
 
-        // Apply snapping to active handle
         if (this.activeHandle === 'start') {
             this.startP.x = target.x;
             this.startP.y = target.y;
@@ -104,21 +121,27 @@ export class Builder {
         } else {
             this.endP.x = target.x;
             this.endP.y = target.y;
-            if (snappedDir !== null) this.endP.dir = snappedDir;
+            this.endP.dir = snappedDir; // Set end direction for Biarcs
         }
 
         this.updatePreview();
     }
 
+    handlePointerUp() {
+        this.isDraggingHandle = false;
+        this.activeHandle = null;
+    }
+
     confirm() {
-        if (this.previewTracks.length > 0) {
-            this.previewTracks.forEach(t => {
-                state.tracks.push({ ...t, h: this.startP.h, id: Date.now() + Math.random() });
-            });
-            const lastTrack = this.previewTracks[this.previewTracks.length - 1];
-            this.startP = { x: this.endP.x, y: this.endP.y, dir: lastTrack.endDir || 0, h: this.startP.h };
-            this.endP = { x: this.startP.x + 50, y: this.startP.y + 50, dir: lastTrack.endDir || 0, h: this.startP.h };
+        if (this.previewTrack) {
+            state.tracks.push({ ...this.previewTrack, id: Date.now() });
+            state.computeIntersections();
+            
+            this.startP = { x: this.endP.x, y: this.endP.y, dir: this.previewTrack.endDir || 0, h: this.startP.h };
+            this.endP = { x: this.startP.x + 50, y: this.startP.y + 50, dir: null, h: this.startP.h };
             this.updatePreview();
         }
     }
+
+    cancel() { this.previewTrack = null; }
 }
