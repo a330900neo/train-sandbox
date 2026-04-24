@@ -53,7 +53,7 @@ export class Builder {
 
         if (this.snapEnabled) {
             // REDUCED SNAP DISTANCE so parallel dragging is easier
-            const snapDist = 4; 
+            const snapDist = 1.5; 
             let snapped = false;
 
             // 1. Snap to Start/End points
