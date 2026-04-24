@@ -1,30 +1,33 @@
+// Grab the dropdown using the exact ID from your HTML
+const connModeSelect = document.getElementById('conn-mode');
+const radiusContainer = document.getElementById('radius-container');
+
+if (connModeSelect) {
+    // 'change' is the safest event for mobile dropdowns
+    connModeSelect.addEventListener('change', (e) => {
+        builder.mode = e.target.value; // Update the builder's mode
+        
+        // Show or hide the Radius input based on the selection
+        if (e.target.value === 'arclinearc') {
+            radiusContainer.classList.remove('hidden');
+        } else {
+            radiusContainer.classList.add('hidden');
+        }
+        
+        // Update the visual preview
+        if (typeof builder.updatePreview === 'function') {
+            builder.updatePreview();
+        }
+        if (typeof updatePreviewText === 'function') {
+            updatePreviewText();
+        }
+    });
+}
+
+
 function setupInputs() {
     let pointers = [];
     let initialPinchDist = null;
-
-    // --- CRITICAL UI PROTECTION ---
-    // Grabbing the correct IDs from your HTML!
-    const buildUI = document.getElementById('build-ui');
-    const toolbar = document.getElementById('toolbar');
-
-    function protectUI(e) {
-        e.stopPropagation(); // Stops the canvas from stealing the tap
-    }
-
-    // Protect the bottom panel (dropdowns, radius input, confirm/cancel)
-    if (buildUI) {
-        buildUI.addEventListener('pointerdown', protectUI);
-        buildUI.addEventListener('touchstart', protectUI);
-        buildUI.addEventListener('wheel', protectUI);
-    }
-
-    // Protect the top toolbar (buttons, save/load, snap checkbox)
-    if (toolbar) {
-        toolbar.addEventListener('pointerdown', protectUI);
-        toolbar.addEventListener('touchstart', protectUI);
-        toolbar.addEventListener('wheel', protectUI);
-    }
-    // ------------------------------
 
     canvas.addEventListener('pointerdown', (e) => {
         // Force the canvas to track this finger even if it slides slightly off-screen
