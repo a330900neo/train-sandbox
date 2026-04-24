@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Train Track Sandbox</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="toolbar">
+        <button id="btn-pan" class="active">Pan/Zoom</button>
+        <button id="btn-build-track">Build Track</button>
+        <button id="btn-build-platform">Platform</button>
+        <button id="btn-select">Select</button>
+        <button id="btn-multi">Multi-Select</button>
+        <div class="divider"></div>
+        <button id="btn-save">Save</button>
+        <button id="btn-load">Load</button>
+        <button id="btn-export">Export</button>
+        <input type="file" id="import-file" style="display: none;">
+        <button id="btn-import" onclick="document.getElementById('import-file').click()">Import</button>
+        <div class="toggle-container">
+            <input type="checkbox" id="toggle-snap" checked>
+            <label for="toggle-snap">Snapping</label>
+        </div>
+    </div>
+
+    <div id="preview-menu" class="hidden">
+        <div class="info-panel">
+            <p>Radius: <span id="info-radius">-</span></p>
+            <p>Max Speed: <span id="info-speed">-</span></p>
+            <p>Gradient: <span id="info-gradient">-</span>%</p>
+        </div>
+        <div class="controls-panel">
+            <label>Start Z: <input type="number" id="input-start-z" value="0" step="0.5"></label>
+            <label>End Z: <input type="number" id="input-end-z" value="0" step="0.5"></label>
+        </div>
+        <div class="actions">
+            <button id="btn-confirm" class="success">Confirm</button>
+            <button id="btn-cancel" class="danger">Cancel</button>
+        </div>
+    </div>
+
+    <div id="context-menu" class="hidden">
+        <div id="single-select-options">
+            <p><strong>Track Data</strong></p>
+            <p id="ctx-data"></p>
+            <button id="btn-delete" class="danger">Delete Track</button>
+        </div>
+        <div id="multi-select-options" class="hidden">
+            <button id="btn-turn-around">Turn Around Feature</button>
+            <button id="btn-block">Force 1 Train (Block)</button>
+        </div>
+    </div>
+
+    <script src="game.js"></script>
+</body>
+</html>
