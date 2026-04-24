@@ -1,20 +1,28 @@
-// Grab the dropdown using the exact ID from your HTML
+import { Builder } from './builder.js';
+import { Camera } from './camera.js';
+import { Renderer } from './renderer.js';
+import { state } from './state.js';
+
+// Initialize game objects
+const canvas = document.getElementById('gameCanvas');
+const builder = new Builder();
+const camera = new Camera(canvas.width, canvas.height);
+const renderer = new Renderer(canvas);
+
+// Mode selection handler
 const connModeSelect = document.getElementById('conn-mode');
 const radiusContainer = document.getElementById('radius-container');
 
 if (connModeSelect) {
-    // 'change' is the safest event for mobile dropdowns
     connModeSelect.addEventListener('change', (e) => {
-        builder.mode = e.target.value; // Update the builder's mode
+        builder.mode = e.target.value;
         
-        // Show or hide the Radius input based on the selection
         if (e.target.value === 'arclinearc') {
             radiusContainer.classList.remove('hidden');
         } else {
             radiusContainer.classList.add('hidden');
         }
         
-        // Update the visual preview
         if (typeof builder.updatePreview === 'function') {
             builder.updatePreview();
         }
@@ -24,23 +32,26 @@ if (connModeSelect) {
     });
 }
 
+function updatePreviewText() {
+    // Update preview text display
+    const previewEl = document.getElementById('preview-data');
+    if (builder.previewTrack && previewEl) {
+        previewEl.textContent = `Len: ${builder.previewTrack.length.toFixed(1)}m | Grad: 0% | Elev: 0m | Rad: 0m | Max: 0 km/h`;
+    }
+}
 
 function setupInputs() {
     let pointers = [];
     let initialPinchDist = null;
 
     canvas.addEventListener('pointerdown', (e) => {
-        // Force the canvas to track this finger even if it slides slightly off-screen
         canvas.setPointerCapture(e.pointerId); 
-        
-        // Prevent duplicate pointers in the array just in case
         pointers = pointers.filter(p => p.pointerId !== e.pointerId);
         pointers.push(e);
 
         const worldPt = camera.screenToWorld(e.clientX, e.clientY);
 
         if (pointers.length === 1) {
-            // First finger down: Start pan or build
             if (state.currentTool === 'track') {
                 if (!builder.handlePointerDown(worldPt)) {
                     camera.handlePanStart(e.clientX, e.clientY);
@@ -51,17 +62,15 @@ function setupInputs() {
                 handleSelection(worldPt);
             }
         } else if (pointers.length === 2) {
-            // Second finger down: Stop panning immediately so we don't jump when zooming
             camera.handlePanEnd(); 
         }
     });
 
     canvas.addEventListener('pointermove', (e) => {
         const index = pointers.findIndex(p => p.pointerId === e.pointerId);
-        if (index !== -1) pointers[index] = e; // Update the pointer's current position
+        if (index !== -1) pointers[index] = e;
 
         if (pointers.length === 2) {
-            // --- MOBILE PINCH ZOOM LOGIC ---
             const dx = pointers[0].clientX - pointers[1].clientX;
             const dy = pointers[0].clientY - pointers[1].clientY;
             const currentPinchDist = Math.hypot(dx, dy);
@@ -76,24 +85,21 @@ function setupInputs() {
             initialPinchDist = currentPinchDist;
 
         } else if (pointers.length === 1) {
-            // --- SINGLE FINGER LOGIC ---
             initialPinchDist = null; 
             
             const worldPt = camera.screenToWorld(e.clientX, e.clientY);
             if (builder.isDraggingHandle) {
                 builder.handlePointerMove(worldPt);
-                if (typeof updatePreviewText === 'function') updatePreviewText();
+                updatePreviewText();
             } else if (camera.isDragging) {
                 camera.handlePanMove(e.clientX, e.clientY);
             }
         }
     });
 
-    // Unified function to handle lifting a finger or losing tracking
     const handlePointerEnd = (e) => {
         pointers = pointers.filter(p => p.pointerId !== e.pointerId);
         
-        // Safety check to ensure the element is still captured before releasing
         if (canvas.hasPointerCapture(e.pointerId)) {
             canvas.releasePointerCapture(e.pointerId);
         }
@@ -103,16 +109,13 @@ function setupInputs() {
         }
 
         if (pointers.length === 1) {
-            // If we lifted one finger of a pinch, cleanly resume panning with the remaining finger
             camera.handlePanStart(pointers[0].clientX, pointers[0].clientY);
         } else if (pointers.length === 0) {
-            // No fingers left
             builder.handlePointerUp();
             camera.handlePanEnd();
         }
     };
 
-    // Catch all ways a touch can end
     canvas.addEventListener('pointerup', handlePointerEnd);
     canvas.addEventListener('pointercancel', handlePointerEnd);
     canvas.addEventListener('pointerout', handlePointerEnd);
@@ -121,3 +124,13 @@ function setupInputs() {
         camera.handleZoom(e.deltaY, e.clientX, e.clientY);
     });
 }
+
+function handleSelection(worldPt) {
+    // Selection logic here
+}
+
+// Initialize on page load
+window.addEventListener('DOMContentLoaded', () => {
+    setupInputs();
+    renderer.startRenderLoop();
+});
