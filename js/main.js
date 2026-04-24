@@ -1,6 +1,13 @@
 function setupInputs() {
     let pointers = [];
     let initialPinchDist = null;
+     // Stop touches on the dropdown menu from bleeding into the game
+    const connMode = document.getElementById('connMode'); // Ensure this matches your <select> ID
+
+    if (connMode) {
+      connMode.addEventListener('pointerdown', (e) => e.stopPropagation());
+      connMode.addEventListener('touchstart', (e) => e.stopPropagation());
+    }
 
     canvas.addEventListener('pointerdown', (e) => {
         // CRITICAL: Force the canvas to track this finger even if it slides slightly off-screen
