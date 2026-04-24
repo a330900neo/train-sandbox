@@ -17,15 +17,55 @@ export class Renderer {
     draw() {
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-        const sortedTracks = [...state.tracks].sort((a, b) => a.h - b.h);
-
-        for (let track of sortedTracks) {
-            this.drawTrack(track, false);
+        // Group tracks by height level to ensure proper layering
+        const tracksByHeight = {};
+        for (let track of state.tracks) {
+            const h = track.h || 0;
+            if (!tracksByHeight[h]) tracksByHeight[h] = [];
+            tracksByHeight[h].push(track);
         }
 
+        const sortedHeights = Object.keys(tracksByHeight).map(Number).sort((a, b) => a - b);
+
+        for (let h of sortedHeights) {
+            const levelTracks = tracksByHeight[h];
+            
+            // PASS 1: Draw ALL track bases for this level (Prevents overlap clipping)
+            this.ctx.save();
+            this.ctx.beginPath();
+            for (let track of levelTracks) {
+                track.segments.forEach(seg => this.setupPath(seg));
+            }
+            this.ctx.strokeStyle = '#666';
+            this.ctx.lineWidth = TRACK_WIDTH * this.camera.zoom;
+            this.ctx.lineCap = 'butt';
+            this.ctx.stroke();
+            this.ctx.restore();
+
+            // PASS 2: Draw ALL rails for this level on top of the bases
+            this.ctx.save();
+            this.ctx.strokeStyle = '#ccc';
+            this.ctx.lineWidth = 0.2 * this.camera.zoom;
+            this.ctx.lineCap = 'butt';
+            
+            this.ctx.beginPath();
+            for (let track of levelTracks) {
+                track.segments.forEach(seg => this.drawOffsetRail(seg, GAUGE / 2));
+            }
+            this.ctx.stroke();
+
+            this.ctx.beginPath();
+            for (let track of levelTracks) {
+                track.segments.forEach(seg => this.drawOffsetRail(seg, -GAUGE / 2));
+            }
+            this.ctx.stroke();
+            this.ctx.restore();
+        }
+
+        // Draw Preview Track
         if (this.builder.previewTrack && state.currentTool === 'track') {
             this.ctx.globalAlpha = 0.5;
-            this.drawTrack(this.builder.previewTrack, true);
+            this.drawSingleTrack(this.builder.previewTrack, true);
             this.ctx.globalAlpha = 1.0;
             this.drawHandles();
         }
@@ -33,40 +73,21 @@ export class Renderer {
         for (let track of state.selection) {
             this.drawHighlight(track);
         }
-
-        // Optional: Draw intersection nodes for debugging/visibility
-        if (state.currentTool === 'track' && this.builder.snapEnabled) {
-            this.ctx.fillStyle = 'rgba(0, 255, 255, 0.5)';
-            for (let pt of state.intersections) {
-                const sp = this.camera.worldToScreen(pt.x, pt.y);
-                this.ctx.beginPath(); this.ctx.arc(sp.x, sp.y, 4, 0, Math.PI*2); this.ctx.fill();
-            }
-        }
     }
 
-    drawTrack(trackData, isPreview) {
+    // Helper for previews and highlights
+    drawSingleTrack(trackData, isPreview) {
         this.ctx.save();
-        
-        // 1. Gray Base (Iterate through segments)
         this.ctx.beginPath();
         trackData.segments.forEach(seg => this.setupPath(seg));
         this.ctx.strokeStyle = isPreview ? '#888' : '#666';
         this.ctx.lineWidth = TRACK_WIDTH * this.camera.zoom;
-        this.ctx.lineCap = 'butt';
         this.ctx.stroke();
 
-        // 2. Rails
         this.ctx.strokeStyle = '#ccc';
         this.ctx.lineWidth = 0.2 * this.camera.zoom;
-        
-        this.ctx.beginPath();
-        trackData.segments.forEach(seg => this.drawOffsetRail(seg, GAUGE / 2));
-        this.ctx.stroke();
-
-        this.ctx.beginPath();
-        trackData.segments.forEach(seg => this.drawOffsetRail(seg, -GAUGE / 2));
-        this.ctx.stroke();
-
+        this.ctx.beginPath(); trackData.segments.forEach(seg => this.drawOffsetRail(seg, GAUGE / 2)); this.ctx.stroke();
+        this.ctx.beginPath(); trackData.segments.forEach(seg => this.drawOffsetRail(seg, -GAUGE / 2)); this.ctx.stroke();
         this.ctx.restore();
     }
 
