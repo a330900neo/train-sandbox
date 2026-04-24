@@ -7,8 +7,12 @@ body, html {
 }
 
 #gameCanvas {
-    display: block; width: 100%; height: 100%;
-    touch-action: none; /* Crucial for custom pan/zoom */
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    touch-action: none; /* CRITICAL: Allows JS to handle pinch-zoom instead of the browser */
+    -webkit-user-select: none;
+    user-select: none;
 }
 
 #toolbar {
