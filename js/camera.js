@@ -2,7 +2,7 @@ export class Camera {
     constructor() {
         this.x = 0;
         this.y = 0;
-        this.zoom = 10; // 10 pixels per meter makes a 3.2m track 32px wide
+        this.zoom = 10; 
         
         this.isDragging = false;
         this.lastX = 0;
@@ -44,16 +44,21 @@ export class Camera {
     }
 
     handleZoom(delta, mouseX, mouseY) {
-        const worldBefore = this.screenToWorld(mouseX, mouseY);
-        
         const zoomFactor = 1.1;
-        if (delta > 0) this.zoom /= zoomFactor;
-        else this.zoom *= zoomFactor;
-        
-        // Cap zoom
-        this.zoom = Math.max(0.5, Math.min(this.zoom, 100));
+        const scale = delta > 0 ? (1 / zoomFactor) : zoomFactor;
+        this.applyZoom(scale, mouseX, mouseY);
+    }
 
-        const worldAfter = this.screenToWorld(mouseX, mouseY);
+    handlePinchZoom(scaleFactor, cx, cy) {
+        this.applyZoom(scaleFactor, cx, cy);
+    }
+
+    applyZoom(scale, screenX, screenY) {
+        const worldBefore = this.screenToWorld(screenX, screenY);
+        this.zoom *= scale;
+        this.zoom = Math.max(0.5, Math.min(this.zoom, 100)); // Cap zoom levels
+        const worldAfter = this.screenToWorld(screenX, screenY);
+        
         this.x -= (worldAfter.x - worldBefore.x);
         this.y -= (worldAfter.y - worldBefore.y);
     }
