@@ -1,8 +1,7 @@
-import { State } from './state.js';
-import { Camera } from './camera.js';
-import { initInput } from './input.js';
-import { Tools } from './tools.js';
-import { render } from './render.js';
+import { render } from './renderer.js';
+import { initTools } from './tools.js';
+import { initIO } from './io.js';
+import { GameState } from './state.js';
 
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
@@ -14,38 +13,37 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
-// Init Systems
-Tools.init();
-initInput(canvas);
+// UI Buttons logic
+document.querySelectorAll('.toolbar button').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+        if(e.target.id === 'btn-export' || e.target.id === 'btn-import') return;
+        
+        document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('active'));
+        e.target.classList.add('active');
+        
+        const actionMap = {
+            'btn-pan': 'pan',
+            'btn-build-track': 'build_track',
+            'btn-build-plat': 'build_plat',
+            'btn-select': 'select',
+            'btn-multi': 'multi'
+        };
+        GameState.currentTool = actionMap[e.target.id];
+    });
+});
 
-// Data Management
-document.getElementById('btn-save').addEventListener('click', () => {
-    localStorage.setItem('trainSave', JSON.stringify(State.tracks));
-    alert('Saved to local storage');
+document.getElementById('toggle-snap').addEventListener('change', (e) => {
+    GameState.snapEnabled = e.target.checked;
 });
-document.getElementById('btn-load').addEventListener('click', () => {
-    const data = localStorage.getItem('trainSave');
-    if (data) State.tracks = JSON.parse(data);
-});
-document.getElementById('btn-export').addEventListener('click', () => {
-    const blob = new Blob([JSON.stringify(State.tracks)], {type: 'application/json'});
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'tracks.json';
-    a.click();
-});
-document.getElementById('btn-import').addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (file) {
-        const reader = new FileReader();
-        reader.onload = (ev) => { State.tracks = JSON.parse(ev.target.result); };
-        reader.readAsText(file);
-    }
-});
+
+// Init subsystems
+initTools(canvas);
+initIO();
 
 // Game Loop
 function loop() {
     render(ctx, canvas);
     requestAnimationFrame(loop);
 }
+
 loop();
