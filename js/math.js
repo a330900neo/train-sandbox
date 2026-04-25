@@ -2,7 +2,54 @@ export function distance(p1, p2) {
     return Math.hypot(p2.x - p1.x, p2.y - p1.y);
 }
 
-// Track Splitting (5m - 40m)
+// ---------------------------------------------------------
+// Single Arc Geometry (Used for normal building)
+// ---------------------------------------------------------
+export function calculateTrackGeometry(p1, dirAngle, p2) {
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const dist = Math.hypot(dx, dy);
+
+    if (dist < 0.1) return { type: 'invalid' };
+
+    const chordAngle = Math.atan2(dy, dx);
+    let theta = chordAngle - dirAngle;
+    
+    while (theta > Math.PI) theta -= Math.PI * 2;
+    while (theta < -Math.PI) theta += Math.PI * 2;
+
+    if (Math.abs(theta) < 0.01 || Math.abs(theta) > Math.PI - 0.01) {
+        return { type: 'straight', start: p1, end: p2, length: dist, startAngle: dirAngle, endAngle: chordAngle };
+    }
+
+    const radius = Math.abs(dist / (2 * Math.sin(theta)));
+
+    if (radius > 20000) {
+        return { type: 'straight', start: p1, end: p2, length: dist, startAngle: dirAngle, endAngle: chordAngle };
+    }
+
+    const isRightTurn = theta > 0;
+    const centerAngle = dirAngle + (isRightTurn ? Math.PI / 2 : -Math.PI / 2);
+    const cx = p1.x + Math.cos(centerAngle) * radius;
+    const cy = p1.y + Math.sin(centerAngle) * radius;
+
+    const startArcAngle = Math.atan2(p1.y - cy, p1.x - cx);
+    const endArcAngle = Math.atan2(p2.y - cy, p2.x - cx);
+    
+    let diff = endArcAngle - startArcAngle;
+    if (isRightTurn && diff < 0) diff += Math.PI * 2;
+    if (!isRightTurn && diff > 0) diff -= Math.PI * 2;
+
+    return {
+        type: 'curve', start: p1, end: p2, center: { x: cx, y: cy },
+        radius: radius, startArcAngle, endArcAngle: startArcAngle + diff,
+        isRightTurn, endAngle: dirAngle + (theta * 2), length: radius * Math.abs(diff)
+    };
+}
+
+// ---------------------------------------------------------
+// Splitting Logic (5m - 40m chunks)
+// ---------------------------------------------------------
 export function splitGeometry(geo, startZ, endZ) {
     const maxL = 40;
     const minL = 5;
@@ -34,7 +81,6 @@ export function splitGeometry(geo, startZ, endZ) {
                 length: geo.length / segments,
                 z1, z2
             });
-            // Recalculate exact start/end points for the chunk
             const r = result[i];
             r.start = { x: r.center.x + Math.cos(r.startArcAngle) * r.radius, y: r.center.y + Math.sin(r.startArcAngle) * r.radius };
             r.end = { x: r.center.x + Math.cos(r.endArcAngle) * r.radius, y: r.center.y + Math.sin(r.endArcAngle) * r.radius };
@@ -43,35 +89,33 @@ export function splitGeometry(geo, startZ, endZ) {
     return result;
 }
 
-// Simplified Dubins CSC (Curve-Straight-Curve) solver for connecting two endpoints
+// ---------------------------------------------------------
+// Dubins CSC Solver (Connecting Ends)
+// ---------------------------------------------------------
 export function calculateDubinsPath(p1, angle1, p2, angle2, r) {
-    // Helper to get center of a tangent circle
     const getCenter = (p, angle, isRight) => ({
         x: p.x + Math.cos(angle + (isRight ? Math.PI/2 : -Math.PI/2)) * r,
         y: p.y + Math.sin(angle + (isRight ? Math.PI/2 : -Math.PI/2)) * r
     });
 
-    // Evaluate 4 combinations: RSR, LSL, RSL, LSR
     const paths = [];
-    const dirs = [[true, true], [false, false], [true, false], [false, true]]; // [StartRight, EndRight]
+    const dirs = [[true, true], [false, false], [true, false], [false, true]]; 
 
     for (let dir of dirs) {
         const c1 = getCenter(p1, angle1, dir[0]);
         const c2 = getCenter(p2, angle2, dir[1]);
         const distC = distance(c1, c2);
 
-        if (dir[0] !== dir[1] && distC < r * 2) continue; // Circles intersect, invalid for cross tangent
+        if (dir[0] !== dir[1] && distC < r * 2) continue; 
 
         let tangentAngle, t1, t2;
         const angleC1C2 = Math.atan2(c2.y - c1.y, c2.x - c1.x);
 
         if (dir[0] === dir[1]) {
-            // LSL or RSR (Outer tangent)
             tangentAngle = angleC1C2 + (dir[0] ? -Math.PI/2 : Math.PI/2);
             t1 = { x: c1.x + Math.cos(tangentAngle)*r, y: c1.y + Math.sin(tangentAngle)*r };
             t2 = { x: c2.x + Math.cos(tangentAngle)*r, y: c2.y + Math.sin(tangentAngle)*r };
         } else {
-            // RSL or LSR (Inner tangent)
             const theta = Math.acos((2 * r) / distC);
             tangentAngle = angleC1C2 + (dir[0] ? -theta : theta);
             const norm = tangentAngle + (dir[0] ? -Math.PI/2 : Math.PI/2);
@@ -89,9 +133,9 @@ export function calculateDubinsPath(p1, angle1, p2, angle2, r) {
         paths[paths.length-1].totalLength += paths[paths.length-1].arc1.length + paths[paths.length-1].arc2.length;
     }
 
-    if (paths.length === 0) return null; // Fallback needed
+    if (paths.length === 0) return null; 
     paths.sort((a, b) => a.totalLength - b.totalLength);
-    return [paths[0].arc1, paths[0].straight, paths[0].arc2].filter(g => g.length > 0.1); // Return shortest path array
+    return [paths[0].arc1, paths[0].straight, paths[0].arc2].filter(g => g.length > 0.1); 
 }
 
 function buildArc(pStart, pEnd, center, r, isRightTurn) {
@@ -108,19 +152,24 @@ function buildArc(pStart, pEnd, center, r, isRightTurn) {
     };
 }
 
-// Distance from point to line segment for Selection
-export function pointToSegmentDist(p, v, w) {
+// ---------------------------------------------------------
+// Geometry helpers for mid-track and parallel snapping
+// ---------------------------------------------------------
+export function closestPointOnSegment(p, v, w) {
     const l2 = distance(v, w) ** 2;
-    if (l2 === 0) return distance(p, v);
+    let angle = Math.atan2(w.y - v.y, w.x - v.x);
+    if (l2 === 0) return { point: v, angle: angle };
     let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
     t = Math.max(0, Math.min(1, t));
-    return distance(p, { x: v.x + t * (w.x - v.x), y: v.y + t * (w.y - v.y) });
+    return { point: { x: v.x + t * (w.x - v.x), y: v.y + t * (w.y - v.y) }, angle: angle };
 }
 
-// Distance from point to Arc
-export function pointToArcDist(p, arc) {
-    const distToCenter = distance(p, arc.center);
-    let angle = Math.atan2(p.y - arc.center.y, p.x - arc.center.x);
-    // Simple bound check (can be improved for precision)
-    return Math.abs(distToCenter - arc.radius);
+export function closestPointOnArc(p, arc) {
+    let angleFromCenter = Math.atan2(p.y - arc.center.y, p.x - arc.center.x);
+    const pt = { 
+        x: arc.center.x + Math.cos(angleFromCenter) * arc.radius, 
+        y: arc.center.y + Math.sin(angleFromCenter) * arc.radius 
+    };
+    let tangentAngle = angleFromCenter + (arc.isRightTurn ? Math.PI/2 : -Math.PI/2);
+    return { point: pt, angle: tangentAngle };
 }
