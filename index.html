@@ -5,21 +5,33 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Train Sandbox</title>
     <link rel="stylesheet" href="style.css">
+    <style>
+        /* Small inline style for the floating zoom controls */
+        #zoom-controls {
+            position: absolute; bottom: 20px; right: 20px;
+            display: flex; flex-direction: column; gap: 10px;
+        }
+        #zoom-controls button {
+            width: 40px; height: 40px; font-size: 24px;
+            border-radius: 5px; cursor: pointer;
+            background: #ecf0f1; border: 2px solid #bdc3c7;
+        }
+        #dubins-controls { margin-top: 5px; display: flex; gap: 5px; justify-content: center; }
+    </style>
 </head>
 <body>
     <div id="ui-top">
         <div class="toolbar">
             <button id="btn-pan" class="active">Pan/Zoom</button>
             <button id="btn-build-track">Build Track</button>
-            <button id="btn-build-plat">Build Platform</button>
             <button id="btn-select">Select</button>
             <button id="btn-multi">Multi-Select</button>
             <button id="btn-delete" class="danger">Delete Selected</button>
         </div>
         <div class="toolbar">
-            <label><input type="checkbox" id="toggle-snap" checked> Snap (0.8m)</label>
+            <label><input type="checkbox" id="toggle-snap" checked> Snap (1.5m)</label>
             <label>Elev (m): <input type="number" id="input-elevation" value="0" step="1" style="width: 50px;"></label>
-            <label>Connection Radius: <input type="range" id="input-radius" min="50" max="1000" value="200" style="width: 80px;"><span id="radius-val">200m</span></label>
+            <label>Dubins Rad: <input type="range" id="input-radius" min="50" max="1000" value="200" style="width: 80px;"><span id="radius-val">200m</span></label>
             <button id="btn-export">Export</button>
             <button id="btn-import">Import</button>
         </div>
@@ -27,8 +39,20 @@
 
     <div id="preview-ui" class="hidden">
         <div id="preview-stats">Length: --m | Elev: --m | Gradient: --% | Radius: --m</div>
-        <button id="btn-confirm-build">Confirm</button>
-        <button id="btn-cancel-build">Cancel</button>
+        <div id="dubins-controls" class="hidden">
+            <button id="btn-flip-start">Flip Start</button>
+            <button id="btn-flip-end">Flip End</button>
+            <button id="btn-next-path">Next Path Option</button>
+        </div>
+        <div style="margin-top: 10px;">
+            <button id="btn-confirm-build">Confirm</button>
+            <button id="btn-cancel-build">Cancel</button>
+        </div>
+    </div>
+
+    <div id="zoom-controls">
+        <button id="btn-zoom-in">+</button>
+        <button id="btn-zoom-out">-</button>
     </div>
 
     <canvas id="gameCanvas"></canvas>
