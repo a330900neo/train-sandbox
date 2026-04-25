@@ -92,6 +92,9 @@ export function splitGeometry(geo, startZ, endZ) {
 // ---------------------------------------------------------
 // Dubins CSC Solver (Connecting Ends)
 // ---------------------------------------------------------
+// ... existing distance and split functions ...
+
+// Dubins CSC Solver - Now returns ALL valid paths
 export function calculateDubinsPath(p1, angle1, p2, angle2, r) {
     const getCenter = (p, angle, isRight) => ({
         x: p.x + Math.cos(angle + (isRight ? Math.PI/2 : -Math.PI/2)) * r,
@@ -124,18 +127,20 @@ export function calculateDubinsPath(p1, angle1, p2, angle2, r) {
             t2 = { x: c2.x + Math.cos(norm2)*r, y: c2.y + Math.sin(norm2)*r };
         }
 
+        const arc1 = buildArc(p1, t1, c1, r, dir[0]);
+        const arc2 = buildArc(t2, p2, c2, r, dir[1]);
+        const straight = { type: 'straight', start: t1, end: t2, length: distance(t1, t2), startAngle: tangentAngle, endAngle: tangentAngle };
+
         paths.push({
-            arc1: buildArc(p1, t1, c1, r, dir[0]),
-            straight: { type: 'straight', start: t1, end: t2, length: distance(t1, t2), startAngle: tangentAngle, endAngle: tangentAngle },
-            arc2: buildArc(t2, p2, c2, r, dir[1]),
-            totalLength: distance(t1, t2)
+            geometries: [arc1, straight, arc2].filter(g => g.length > 0.1),
+            totalLength: distance(t1, t2) + arc1.length + arc2.length
         });
-        paths[paths.length-1].totalLength += paths[paths.length-1].arc1.length + paths[paths.length-1].arc2.length;
     }
 
-    if (paths.length === 0) return null; 
+    if (paths.length === 0) return []; 
+    // Sort so the shortest is index 0
     paths.sort((a, b) => a.totalLength - b.totalLength);
-    return [paths[0].arc1, paths[0].straight, paths[0].arc2].filter(g => g.length > 0.1); 
+    return paths.map(p => p.geometries); 
 }
 
 function buildArc(pStart, pEnd, center, r, isRightTurn) {
@@ -151,6 +156,7 @@ function buildArc(pStart, pEnd, center, r, isRightTurn) {
         isRightTurn, length: Math.abs(diff) * r
     };
 }
+// ... remainder of math.js
 
 // ---------------------------------------------------------
 // Geometry helpers for mid-track and parallel snapping
