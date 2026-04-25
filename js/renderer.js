@@ -3,14 +3,30 @@ import { GameState } from './state.js';
 
 export function render(ctx, canvas) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Draw Grid (optional, helps with scale)
+    drawGrid(ctx);
+
+    // Draw confirmed tracks
+    GameState.tracks.forEach(track => drawTrack(ctx, track, false));
+
+    // Draw preview track
+    if (GameState.preview && GameState.preview.geometry) {
+        drawTrack(ctx, GameState.preview.geometry, true);
+        drawHandles(ctx, GameState.preview);
+    }
+}
+
+function drawTrack(ctx, geo, isPreview) {
+    if (geo.type === 'invalid') return;
+
+    ctx.save();
     
     // Scale: 1.435m gauge, 3m track base width
     const baseWidth = 3 * Camera.zoom;
     const gaugeWidth = 1.435 * Camera.zoom;
-    const innerClearWidth = gaugeWidth - (0.2 * Camera.zoom); // 0.1m rail width
 
-    // Helper to generate the path for a track
-    const createPath = (geo) => {
+    const drawPath = () => {
         ctx.beginPath();
         if (geo.type === 'straight') {
             const start = Camera.worldToScreen(geo.start.x, geo.start.y);
@@ -20,47 +36,59 @@ export function render(ctx, canvas) {
         } else if (geo.type === 'curve') {
             const center = Camera.worldToScreen(geo.center.x, geo.center.y);
             const radius = geo.radius * Camera.zoom;
+            // Canvas arc is always clockwise by default unless specified
             ctx.arc(center.x, center.y, radius, geo.startArcAngle, geo.endArcAngle, !geo.isRightTurn);
         }
     };
 
-    // Collect all tracks to draw (confirmed + preview sections)
-    let tracksToDraw = [...GameState.tracks];
-    if (GameState.preview && GameState.preview.geometries) {
-        tracksToDraw = tracksToDraw.concat(GameState.preview.geometries.map(g => ({...g, isPreview: true})));
-    }
-
-    // PASS 1: Draw ALL Gray Bases
+    // 1. Draw Gray Base
     ctx.lineWidth = baseWidth;
-    tracksToDraw.forEach(track => {
-        ctx.strokeStyle = track.isPreview ? 'rgba(149, 165, 166, 0.5)' : '#7f8c8d';
-        if (track.selected) ctx.strokeStyle = '#f1c40f'; // Highlight selected
-        createPath(track);
-        ctx.stroke();
-    });
+    ctx.strokeStyle = isPreview ? 'rgba(149, 165, 166, 0.5)' : '#7f8c8d';
+    drawPath();
+    ctx.stroke();
 
-    // PASS 2: Draw ALL Outer Rails (Dark)
+    // 2. Draw Rails (Using trick: draw thick track, then clear inside, but we need 2 lines)
+    // For proper rail rendering at scale, we use stroke with dashed/parallel offsets or composite operations.
+    // Simplified parallel rendering:
     ctx.lineWidth = gaugeWidth;
-    tracksToDraw.forEach(track => {
-        ctx.strokeStyle = track.isPreview ? 'rgba(44, 62, 80, 0.5)' : '#2c3e50';
-        createPath(track);
-        ctx.stroke();
-    });
+    ctx.strokeStyle = isPreview ? 'rgba(44, 62, 80, 0.5)' : '#2c3e50';
+    drawPath();
+    ctx.stroke();
+    
+    // Fill the middle of the gauge to expose the base color
+    ctx.lineWidth = gaugeWidth - (0.2 * Camera.zoom); // 0.1m rail width
+    ctx.strokeStyle = isPreview ? 'rgba(149, 165, 166, 0.5)' : '#7f8c8d';
+    drawPath();
+    ctx.stroke();
 
-    // PASS 3: Draw ALL Inner Clears (Exposes the base color between rails)
-    ctx.lineWidth = innerClearWidth;
-    tracksToDraw.forEach(track => {
-        ctx.strokeStyle = track.isPreview ? 'rgba(149, 165, 166, 0.5)' : '#7f8c8d';
-        if (track.selected) ctx.strokeStyle = '#f1c40f';
-        createPath(track);
-        ctx.stroke();
-    });
+    ctx.restore();
+}
 
-    // Draw handles for preview
-    if (GameState.preview) {
-        const p1 = Camera.worldToScreen(GameState.preview.p1.x, GameState.preview.p1.y);
-        const p2 = Camera.worldToScreen(GameState.preview.p2.x, GameState.preview.p2.y);
-        ctx.fillStyle = '#e74c3c'; ctx.beginPath(); ctx.arc(p1.x, p1.y, 6, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#3498db'; ctx.beginPath(); ctx.arc(p2.x, p2.y, 6, 0, Math.PI * 2); ctx.fill();
+function drawHandles(ctx, preview) {
+    const p1 = Camera.worldToScreen(preview.p1.x, preview.p1.y);
+    const p2 = Camera.worldToScreen(preview.p2.x, preview.p2.y);
+
+    ctx.fillStyle = '#e74c3c';
+    ctx.beginPath(); ctx.arc(p1.x, p1.y, 8, 0, Math.PI * 2); ctx.fill();
+    
+    ctx.fillStyle = '#3498db';
+    ctx.beginPath(); ctx.arc(p2.x, p2.y, 8, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawGrid(ctx) {
+    // Basic 10x10 meter grid
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+    ctx.lineWidth = 1;
+    const size = 10 * Camera.zoom;
+    const offsetX = (Camera.x * Camera.zoom) % size;
+    const offsetY = (Camera.y * Camera.zoom) % size;
+
+    ctx.beginPath();
+    for (let x = -offsetX; x < window.innerWidth; x += size) {
+        ctx.moveTo(x, 0); ctx.lineTo(x, window.innerHeight);
     }
+    for (let y = -offsetY; y < window.innerHeight; y += size) {
+        ctx.moveTo(0, y); ctx.lineTo(window.innerWidth, y);
+    }
+    ctx.stroke();
 }
