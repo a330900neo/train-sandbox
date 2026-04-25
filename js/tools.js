@@ -10,54 +10,68 @@ export function initTools(canvas) {
     canvas.addEventListener('pointerdown', onPointerDown);
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerup', onPointerUp);
-    canvas.addEventListener('wheel', onWheel, { passive: false }); // Zoom Fixed!
+    canvas.addEventListener('wheel', onWheel, { passive: false });
     
     document.getElementById('btn-confirm-build').addEventListener('click', confirmBuild);
     document.getElementById('btn-cancel-build').addEventListener('click', cancelBuild);
     
     document.getElementById('input-elevation').addEventListener('change', (e) => GameState.currentElevation = parseFloat(e.target.value));
-    document.getElementById('input-radius').addEventListener('input', (e) => {
-        GameState.connectionRadius = parseFloat(e.target.value);
-        document.getElementById('radius-val').innerText = `${GameState.connectionRadius}m`;
-        if (GameState.preview) updatePreviewGeometry();
-    });
+    
+    // Dubins radius tuning controls
+    document.getElementById('btn-dubins-up').addEventListener('click', () => tuneDubins(10));
+    document.getElementById('btn-dubins-down').addEventListener('click', () => tuneDubins(-10));
 }
 
-// Advanced Snapping
+function tuneDubins(amount) {
+    const p = GameState.preview;
+    const testRadius = GameState.connectionRadius + amount;
+    if (testRadius < 50) return; // Minimum absolute radius
+    
+    // Test if the connection is still geometrically possible before applying
+    if (calculateDubinsPath(p.p1, p.startAngle, p.p2, p.endAngle + Math.PI, testRadius)) {
+        GameState.connectionRadius = testRadius;
+        updatePreviewGeometry();
+    }
+}
+
 function getSnap(worldPos) {
     if (!GameState.snapEnabled) return null;
-    const minD = GameState.snapRadius; // 0.8m
+    let bestSnap = null;
+    let minD = GameState.snapRadius; 
 
-    // 1. Endpoint Snapping (Highest Priority)
+    // 1. Endpoint Snapping (Highest Priority to lock in Dubins paths)
     for (let track of GameState.tracks) {
-        if (distance(worldPos, track.start) < minD) return { pos: track.start, angle: track.startAngle + Math.PI, z: track.z1, type: 'end' };
-        if (distance(worldPos, track.end) < minD) return { pos: track.end, angle: track.endAngle, z: track.z2, type: 'end' };
+        let d1 = distance(worldPos, track.start);
+        if (d1 < minD) { minD = d1; bestSnap = { pos: track.start, angle: track.startAngle + Math.PI, z: track.z1, type: 'end' }; }
+        
+        let d2 = distance(worldPos, track.end);
+        if (d2 < minD) { minD = d2; bestSnap = { pos: track.end, angle: track.endAngle, z: track.z2, type: 'end' }; }
     }
+    
+    // If we snapped to an endpoint, return early so we don't accidentally grab a parallel track right next to it
+    if (bestSnap && bestSnap.type === 'end') return bestSnap;
 
     // 2. Mid-Track & Parallel Snapping
     for (let track of GameState.tracks) {
-        let info = track.type === 'straight' ? 
-            closestPointOnSegment(worldPos, track.start, track.end) : 
-            closestPointOnArc(worldPos, track);
-
+        let info = track.type === 'straight' ? closestPointOnSegment(worldPos, track.start, track.end) : closestPointOnArc(worldPos, track);
         let d = distance(worldPos, info.point);
 
-        // Snap exactly to mid-track
         if (d < minD) {
-            return { pos: info.point, angle: info.angle, z: track.z1, type: 'mid' };
+            minD = d; bestSnap = { pos: info.point, angle: info.angle, z: track.z1, type: 'mid' };
         }
 
-        // Snap to Parallel (3.2m offset)
-        if (Math.abs(d - GameState.parallelOffset) < minD) {
+        let pDist = Math.abs(d - GameState.parallelOffset);
+        if (pDist < minD) {
+            minD = pDist;
             let offsetDir = Math.atan2(worldPos.y - info.point.y, worldPos.x - info.point.x);
             let parallelPos = {
                 x: info.point.x + Math.cos(offsetDir) * GameState.parallelOffset,
                 y: info.point.y + Math.sin(offsetDir) * GameState.parallelOffset
             };
-            return { pos: parallelPos, angle: info.angle, z: track.z1, type: 'parallel' };
+            bestSnap = { pos: parallelPos, angle: info.angle, z: track.z1, type: 'parallel' };
         }
     }
-    return null;
+    return bestSnap;
 }
 
 function selectTrackAt(worldPos, multi) {
@@ -145,32 +159,50 @@ function onWheel(e) {
 function updatePreviewGeometry() {
     const p = GameState.preview;
     let path = [];
+    let isDubins = false;
+    let displayRadius = 0;
 
-    // ONLY use Dubins path if BOTH ends are snapped to an endpoint.
+    // Use Dubins path ONLY if both ends are locked to track ends
     if (p.p1Type === 'end' && p.p2Type === 'end') {
         let dubins = calculateDubinsPath(p.p1, p.startAngle, p.p2, p.endAngle + Math.PI, GameState.connectionRadius);
-        if (dubins) path = dubins;
+        if (dubins) {
+            path = dubins;
+            isDubins = true;
+            displayRadius = GameState.connectionRadius;
+        }
     } 
     
-    // Otherwise, use standard simple arc / straight generation
+    // Normal track building
     if (path.length === 0) {
         let singleGeo = calculateTrackGeometry(p.p1, p.startAngle, p.p2);
         if (singleGeo && singleGeo.type !== 'invalid') {
             path = [singleGeo];
+            displayRadius = singleGeo.type === 'curve' ? singleGeo.radius : 0;
         } else {
-            // Fallback to straight line if math breaks
             path = [{ type: 'straight', start: p.p1, end: p.p2, length: distance(p.p1, p.p2), startAngle: p.startAngle, endAngle: p.endAngle }];
+            displayRadius = 0;
         }
     }
 
     p.geometries = path;
     
+    // UI Updates
+    document.getElementById('dubins-controls').classList.toggle('hidden', !isDubins);
+    document.getElementById('dubins-radius-val').innerText = `${GameState.connectionRadius}m`;
+    
     let totalLength = path.reduce((sum, g) => sum + g.length, 0);
     let dZ = p.endZ - p.startZ;
     let gradient = totalLength > 0 ? (dZ / totalLength) * 100 : 0;
 
+    // Dynamic Clearance (base 3.2m + widening based on radius curve formula)
+    let clearance = 3.2; 
+    if (displayRadius > 0 && displayRadius < 10000) {
+        clearance += 22.5 / displayRadius; 
+    }
+
+    let radString = displayRadius > 0 ? `${Math.round(displayRadius)}m` : `Straight`;
     document.getElementById('preview-stats').innerText = 
-        `Len: ${Math.round(totalLength)}m | Z1: ${Math.round(p.startZ)}m Z2: ${Math.round(p.endZ)}m | Grad: ${gradient.toFixed(1)}% | Rad: ${GameState.connectionRadius}m`;
+        `Len: ${Math.round(totalLength)}m | Z1: ${Math.round(p.startZ)}m Z2: ${Math.round(p.endZ)}m | Grad: ${gradient.toFixed(1)}% | Rad: ${radString} | Clearance: ${clearance.toFixed(2)}m`;
 }
 
 function confirmBuild() {
