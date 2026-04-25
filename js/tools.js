@@ -1,6 +1,6 @@
 import { Camera } from './camera.js';
 import { GameState } from './state.js';
-import { calculateDubinsPath, distance, splitGeometry, pointToSegmentDist, pointToArcDist } from './math.js';
+import { calculateDubinsPath, calculateTrackGeometry, distance, splitGeometry, closestPointOnSegment, closestPointOnArc } from './math.js';
 
 let isDragging = false;
 let dragTarget = null;
@@ -10,6 +10,7 @@ export function initTools(canvas) {
     canvas.addEventListener('pointerdown', onPointerDown);
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('wheel', onWheel, { passive: false }); // Zoom Fixed!
     
     document.getElementById('btn-confirm-build').addEventListener('click', confirmBuild);
     document.getElementById('btn-cancel-build').addEventListener('click', cancelBuild);
@@ -18,43 +19,52 @@ export function initTools(canvas) {
     document.getElementById('input-radius').addEventListener('input', (e) => {
         GameState.connectionRadius = parseFloat(e.target.value);
         document.getElementById('radius-val').innerText = `${GameState.connectionRadius}m`;
-        if (GameState.preview) updatePreviewGeometry(); // Live update
+        if (GameState.preview) updatePreviewGeometry();
     });
 }
 
+// Advanced Snapping
 function getSnap(worldPos) {
     if (!GameState.snapEnabled) return null;
-    let closest = null;
-    let minD = GameState.snapRadius;
+    const minD = GameState.snapRadius; // 0.8m
 
-    // Endpoint snapping
+    // 1. Endpoint Snapping (Highest Priority)
     for (let track of GameState.tracks) {
-        const dStart = distance(worldPos, track.start);
-        if (dStart < minD) { minD = dStart; closest = { pos: track.start, angle: track.startAngle + Math.PI, z: track.z1, isParallel: false }; }
-        const dEnd = distance(worldPos, track.end);
-        if (dEnd < minD) { minD = dEnd; closest = { pos: track.end, angle: track.endAngle, z: track.z2, isParallel: false }; }
+        if (distance(worldPos, track.start) < minD) return { pos: track.start, angle: track.startAngle + Math.PI, z: track.z1, type: 'end' };
+        if (distance(worldPos, track.end) < minD) return { pos: track.end, angle: track.endAngle, z: track.z2, type: 'end' };
     }
 
-    // Parallel snapping (track sides)
-    if (!closest) {
-        for (let track of GameState.tracks) {
-            let d = track.type === 'straight' ? pointToSegmentDist(worldPos, track.start, track.end) : pointToArcDist(worldPos, track);
-            // If mouse is near the 3.2m offset bounds
-            if (Math.abs(d - GameState.parallelOffset) < GameState.snapRadius) {
-                // In a full implementation, we'd calculate the exact projected normal point here.
-                // For brevity, we return a hint that we want parallel offset.
-                return { pos: worldPos, angle: track.endAngle, z: track.z1, isParallel: true, refId: track.id };
-            }
+    // 2. Mid-Track & Parallel Snapping
+    for (let track of GameState.tracks) {
+        let info = track.type === 'straight' ? 
+            closestPointOnSegment(worldPos, track.start, track.end) : 
+            closestPointOnArc(worldPos, track);
+
+        let d = distance(worldPos, info.point);
+
+        // Snap exactly to mid-track
+        if (d < minD) {
+            return { pos: info.point, angle: info.angle, z: track.z1, type: 'mid' };
+        }
+
+        // Snap to Parallel (3.2m offset)
+        if (Math.abs(d - GameState.parallelOffset) < minD) {
+            let offsetDir = Math.atan2(worldPos.y - info.point.y, worldPos.x - info.point.x);
+            let parallelPos = {
+                x: info.point.x + Math.cos(offsetDir) * GameState.parallelOffset,
+                y: info.point.y + Math.sin(offsetDir) * GameState.parallelOffset
+            };
+            return { pos: parallelPos, angle: info.angle, z: track.z1, type: 'parallel' };
         }
     }
-    return closest;
+    return null;
 }
 
 function selectTrackAt(worldPos, multi) {
     let clickedId = null;
     for (let track of GameState.tracks) {
-        let d = track.type === 'straight' ? pointToSegmentDist(worldPos, track.start, track.end) : pointToArcDist(worldPos, track);
-        if (d < 2) { clickedId = track.id; break; } // Hitbox 2m
+        let info = track.type === 'straight' ? closestPointOnSegment(worldPos, track.start, track.end) : closestPointOnArc(worldPos, track);
+        if (distance(worldPos, info.point) < 2) { clickedId = track.id; break; }
     }
 
     if (!multi) GameState.selectedTracks.clear();
@@ -87,6 +97,8 @@ function onPointerDown(e) {
                 endAngle: snap ? snap.angle : 0,
                 startZ: snap && snap.z !== undefined ? snap.z : GameState.currentElevation,
                 endZ: GameState.currentElevation,
+                p1Type: snap ? snap.type : 'free',
+                p2Type: 'free',
                 geometries: []
             };
             dragTarget = 'p2';
@@ -107,9 +119,11 @@ function onPointerMove(e) {
 
         if (dragTarget === 'p1') {
             GameState.preview.p1 = currentPos;
+            GameState.preview.p1Type = snap ? snap.type : 'free';
             if (snap) { GameState.preview.startAngle = snap.angle; GameState.preview.startZ = snap.z; }
         } else if (dragTarget === 'p2') {
             GameState.preview.p2 = currentPos;
+            GameState.preview.p2Type = snap ? snap.type : 'free';
             if (snap) { GameState.preview.endAngle = snap.angle; GameState.preview.endZ = snap.z; }
         }
         updatePreviewGeometry();
@@ -121,14 +135,32 @@ function onPointerMove(e) {
 
 function onPointerUp() { isDragging = false; dragTarget = null; }
 
+function onWheel(e) {
+    if (GameState.currentTool !== 'pan') return;
+    e.preventDefault();
+    const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9;
+    Camera.applyZoom(zoomFactor, e.clientX, e.clientY);
+}
+
 function updatePreviewGeometry() {
     const p = GameState.preview;
-    // Uses Dubins path to generate geometry array
-    let path = calculateDubinsPath(p.p1, p.startAngle, p.p2, p.endAngle + Math.PI, GameState.connectionRadius);
+    let path = [];
+
+    // ONLY use Dubins path if BOTH ends are snapped to an endpoint.
+    if (p.p1Type === 'end' && p.p2Type === 'end') {
+        let dubins = calculateDubinsPath(p.p1, p.startAngle, p.p2, p.endAngle + Math.PI, GameState.connectionRadius);
+        if (dubins) path = dubins;
+    } 
     
-    // Fallback to straight line if Dubins fails (endpoints too close/awkward angles)
-    if (!path) {
-        path = [{ type: 'straight', start: p.p1, end: p.p2, length: distance(p.p1, p.p2), startAngle: p.startAngle, endAngle: p.endAngle }];
+    // Otherwise, use standard simple arc / straight generation
+    if (path.length === 0) {
+        let singleGeo = calculateTrackGeometry(p.p1, p.startAngle, p.p2);
+        if (singleGeo && singleGeo.type !== 'invalid') {
+            path = [singleGeo];
+        } else {
+            // Fallback to straight line if math breaks
+            path = [{ type: 'straight', start: p.p1, end: p.p2, length: distance(p.p1, p.p2), startAngle: p.startAngle, endAngle: p.endAngle }];
+        }
     }
 
     p.geometries = path;
@@ -150,7 +182,6 @@ function confirmBuild() {
 
         GameState.preview.geometries.forEach(geo => {
             let nextZ = curZ + (geo.length / totalL) * dz;
-            // Subdivide tracks into 5m-40m chunks
             finalTracks.push(...splitGeometry(geo, curZ, nextZ));
             curZ = nextZ;
         });
