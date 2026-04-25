@@ -20,6 +20,10 @@ document.querySelectorAll('.toolbar button').forEach(btn => {
         
         document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('active'));
         e.target.classList.add('active');
+        if(e.target.id === 'btn-delete') {
+            GameState.deleteSelected();
+            return;
+        }
         
         const actionMap = {
             'btn-pan': 'pan',
