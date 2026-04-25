@@ -6,8 +6,8 @@ export const GameState = {
     currentTool: 'pan',
     
     snapEnabled: true,
-    snapRadius: 0.8, // 0.8m snapping
-    parallelOffset: 3.2, // 3.2m train width
+    snapRadius: 1.5, // Increased to 1.5m
+    parallelOffset: 3.5, // Standard 3.5m centerline distance
     
     currentElevation: 0,
     connectionRadius: 200,
