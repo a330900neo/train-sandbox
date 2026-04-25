@@ -1,21 +1,18 @@
-export const State = {
+export const GameState = {
     tracks: [],
     platforms: [],
+    
+    // Tools: 'pan', 'build_track', 'build_plat', 'select', 'multi'
     currentTool: 'pan',
-    snapping: true,
-    scale: 10, // 10 pixels = 1 meter
-    gauge: 1.435, // meters
-    trainWidth: 3.2, // meters
     
-    // Preview Data
-    preview: {
-        active: false,
-        p1: { x: 0, y: 0, z: 0, dir: null },
-        p2: { x: 0, y: 0, z: 0, dir: null },
-        dragging: null // 'p1' or 'p2'
-    },
+    // Snapping configuration
+    snapEnabled: true,
+    snapRadius: 5, // meters
+
+    // Preview state for building
+    preview: null,
     
-    // Config
-    maxSpeedRadiusRatio: 350 / 2000, // naive approx
-    straightThreshold: 20000
+    addTrack(trackData) {
+        this.tracks.push({ ...trackData, id: Date.now() });
+    }
 };
