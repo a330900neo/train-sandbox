@@ -15,6 +15,7 @@ resize();
 
 // UI Buttons logic
 // UI Buttons logic
+// UI Buttons logic
 document.querySelectorAll('.toolbar button').forEach(btn => {
     btn.addEventListener('click', (e) => {
         // 1. Handle one-off action buttons first
