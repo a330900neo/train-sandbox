@@ -7,10 +7,11 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div id="ui-top">
+   <div id="ui-top">
         <div class="toolbar">
             <button id="btn-pan" class="active">Pan/Zoom</button>
             <button id="btn-build-track">Build Track</button>
+            <button id="btn-build-plat">Build Platform</button>
             <button id="btn-select">Select</button>
             <button id="btn-multi">Multi-Select</button>
             <button id="btn-delete" class="danger">Delete Selected</button>
@@ -19,6 +20,8 @@
             <label><input type="checkbox" id="toggle-snap" checked> Snap (0.8m)</label>
             <label>Elev (m): <input type="number" id="input-elevation" value="0" step="1" style="width: 50px;"></label>
             <label>Connection Radius: <input type="range" id="input-radius" min="50" max="1000" value="200" style="width: 80px;"><span id="radius-val">200m</span></label>
+            <button id="btn-export">Export</button>
+            <button id="btn-import">Import</button>
         </div>
     </div>
 
