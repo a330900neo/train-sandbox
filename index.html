@@ -11,25 +11,21 @@
         <div class="toolbar">
             <button id="btn-pan" class="active">Pan/Zoom</button>
             <button id="btn-build-track">Build Track</button>
-            <button id="btn-select">Select Tool</button>
+            <button id="btn-build-plat">Build Platform</button>
+            <button id="btn-select">Select</button>
+            <button id="btn-multi">Multi-Select</button>
         </div>
         <div class="toolbar">
-            <label><input type="checkbox" id="toggle-snap" checked> Snap</label>
-            <label>Elev(m): <input type="number" id="input-elevation" value="0" style="width: 50px;"></label>
-            <label>Radius(m): <input type="number" id="input-radius" value="500" style="width: 60px;"></label>
+            <label><input type="checkbox" id="toggle-snap" checked> Snapping</label>
+            <button id="btn-export">Export</button>
+            <button id="btn-import">Import</button>
         </div>
     </div>
 
     <div id="preview-ui" class="hidden">
-        <div id="preview-stats">Length: --m | Grad: --% | Elev: --m</div>
+        <div id="preview-stats">Radius: -- m | Max Speed: -- km/h | Elevation: 0m</div>
         <button id="btn-confirm-build">Confirm</button>
         <button id="btn-cancel-build">Cancel</button>
-    </div>
-
-    <div id="select-popup" class="hidden" style="position: absolute; background: rgba(0,0,0,0.8); color: white; padding: 10px; border-radius: 5px; z-index: 30;">
-        <div id="select-data" style="margin-bottom: 5px;">Data</div>
-        <button id="btn-delete-track" style="background: #e74c3c;">Delete</button>
-        <button id="btn-close-select">Close</button>
     </div>
 
     <canvas id="gameCanvas"></canvas>
