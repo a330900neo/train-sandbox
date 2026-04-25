@@ -1,91 +1,129 @@
-import { State } from './state.js';
 import { Camera } from './camera.js';
-import { MathUtils } from './math.js';
+import { GameState } from './state.js';
+import { calculateTrackGeometry, distance } from './math.js';
 
-export const Tools = {
-    init() {
-        document.querySelectorAll('.toolbar button').forEach(btn => {
-            if (btn.id.startsWith('btn-tool')) {
-                btn.addEventListener('click', (e) => this.switchTool(e.target));
-            }
-        });
+let isDragging = false;
+let lastPointer = null;
+let dragTarget = null; // 'start' or 'end' handle
 
-        document.getElementById('toggle-snap').addEventListener('change', e => {
-            State.snapping = e.target.checked;
-        });
+export function initTools(canvas) {
+    canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('pointermove', onPointerMove);
+    canvas.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('wheel', onWheel, { passive: false });
 
-        document.getElementById('btn-confirm-build').addEventListener('click', () => this.confirmBuild());
-        document.getElementById('btn-cancel-build').addEventListener('click', () => this.cancelBuild());
-    },
+    document.getElementById('btn-confirm-build').addEventListener('click', confirmBuild);
+    document.getElementById('btn-cancel-build').addEventListener('click', cancelBuild);
+}
 
-    switchTool(btn) {
-        document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        State.currentTool = btn.id.replace('btn-tool-', '');
-        
-        if (State.currentTool !== 'build') this.cancelBuild();
-    },
-
-    handlePointerDown(worldPos) {
-        if (State.currentTool === 'build') {
-            if (!State.preview.active) {
-                // Start building
-                let snap = MathUtils.findSnapPoint(worldPos);
-                State.preview.p1 = snap || { ...worldPos, z: 0, dir: null };
-                State.preview.p2 = { ...State.preview.p1 };
-                State.preview.active = true;
-                State.preview.dragging = 'p2';
-                document.getElementById('preview-panel').classList.remove('hidden');
-            } else {
-                // Check if clicking near existing preview points to drag them
-                if (MathUtils.dist(worldPos, State.preview.p1) < 2) State.preview.dragging = 'p1';
-                else if (MathUtils.dist(worldPos, State.preview.p2) < 2) State.preview.dragging = 'p2';
-                else State.preview.dragging = 'p2'; // Default drag p2
-            }
-        }
-    },
-
-    handlePointerMove(worldPos) {
-        if (State.currentTool === 'build' && State.preview.active && State.preview.dragging) {
-            let snap = MathUtils.findSnapPoint(worldPos);
-            let target = snap || { ...worldPos, z: parseFloat(document.getElementById('track-height').value), dir: null };
-            
-            if (State.preview.dragging === 'p1') State.preview.p1 = target;
-            if (State.preview.dragging === 'p2') State.preview.p2 = target;
-            
-            this.updatePreviewStats();
-        }
-    },
-
-    handlePointerUp() {
-        if (State.preview.dragging) State.preview.dragging = null;
-    },
-
-    updatePreviewStats() {
-        const path = MathUtils.calculatePath(State.preview.p1, State.preview.p2);
-        if (!path) return;
-        
-        let radiusText = path.type === 'straight' ? 'Straight' : Math.round(path.radius) + 'm';
-        let speedText = path.type === 'straight' ? '350' : Math.min(350, Math.round(Math.sqrt(path.radius) * 10));
-        let gradText = Math.abs(State.preview.p2.z - State.preview.p1.z) / path.length * 100;
-
-        document.getElementById('preview-stats').innerHTML = 
-            `Radius: ${radiusText}<br>Max Speed: ${speedText} km/h<br>Gradient: ${gradText.toFixed(1)}%`;
-    },
-
-    confirmBuild() {
-        const path = MathUtils.calculatePath(State.preview.p1, State.preview.p2);
-        if (path) {
-            path.startDir = State.preview.p1.dir || Math.atan2(path.p2.y - path.p1.y, path.p2.x - path.p1.x);
-            path.endDir = MathUtils.getEndTangent(path);
-            State.tracks.push(path);
-        }
-        this.cancelBuild();
-    },
-
-    cancelBuild() {
-        State.preview.active = false;
-        State.preview.dragging = null;
-        document.getElementById('preview-panel').classList.add('hidden');
+function getSnap(worldPos) {
+    if (!GameState.snapEnabled) return null;
+    // Basic endpoint snap implementation
+    for (let track of GameState.tracks) {
+        if (distance(worldPos, track.start) < GameState.snapRadius) return { pos: track.start, angle: track.startAngle + Math.PI };
+        if (distance(worldPos, track.end) < GameState.snapRadius) return { pos: track.end, angle: track.endAngle };
     }
-};
+    return null;
+}
+
+function onPointerDown(e) {
+    const worldPos = Camera.screenToWorld(e.clientX, e.clientY);
+    lastPointer = { x: e.clientX, y: e.clientY };
+    isDragging = true;
+
+    if (GameState.currentTool === 'build_track') {
+        if (GameState.preview) {
+            // Check if clicking handles to drag
+            if (distance(worldPos, GameState.preview.p1) < 5) dragTarget = 'p1';
+            else if (distance(worldPos, GameState.preview.p2) < 5) dragTarget = 'p2';
+            else isDragging = false; // Ignore clicks elsewhere in preview mode
+        } else {
+            // Start a new preview
+            let startPos = worldPos;
+            let startAngle = 0; // Default angle
+            
+            const snap = getSnap(worldPos);
+            if (snap) {
+                startPos = { x: snap.pos.x, y: snap.pos.y };
+                startAngle = snap.angle;
+            }
+
+            GameState.preview = {
+                p1: startPos,
+                p2: { x: startPos.x + 10, y: startPos.y }, // initial short offset
+                startAngle: startAngle,
+                geometry: null
+            };
+            dragTarget = 'p2';
+            document.getElementById('preview-ui').classList.remove('hidden');
+        }
+    } else if (GameState.currentTool === 'pan') {
+        dragTarget = 'pan';
+    }
+}
+
+function onPointerMove(e) {
+    if (!isDragging) return;
+    const worldPos = Camera.screenToWorld(e.clientX, e.clientY);
+
+    if (GameState.currentTool === 'build_track' && GameState.preview) {
+        let currentPos = worldPos;
+        const snap = getSnap(worldPos);
+        if (snap) currentPos = { x: snap.pos.x, y: snap.pos.y };
+
+        if (dragTarget === 'p1') {
+            GameState.preview.p1 = currentPos;
+            if (snap) GameState.preview.startAngle = snap.angle;
+        } else if (dragTarget === 'p2') {
+            GameState.preview.p2 = currentPos;
+        }
+
+        // Update geometry calculation
+        GameState.preview.geometry = calculateTrackGeometry(
+            GameState.preview.p1, 
+            GameState.preview.startAngle, 
+            GameState.preview.p2
+        );
+        updatePreviewUI();
+    } else if (dragTarget === 'pan') {
+        Camera.applyPan(e.clientX - lastPointer.x, e.clientY - lastPointer.y);
+    }
+
+    lastPointer = { x: e.clientX, y: e.clientY };
+}
+
+function onPointerUp() {
+    isDragging = false;
+    dragTarget = null;
+}
+
+function onWheel(e) {
+    e.preventDefault();
+    const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9;
+    Camera.applyZoom(zoomFactor, e.clientX, e.clientY);
+}
+
+function updatePreviewUI() {
+    if (!GameState.preview || !GameState.preview.geometry) return;
+    const geo = GameState.preview.geometry;
+    const ui = document.getElementById('preview-stats');
+    if (geo.type === 'straight') {
+        ui.innerText = `Type: Straight | Length: ${Math.round(geo.length)}m | Max Speed: 350 km/h`;
+    } else if (geo.type === 'curve') {
+        ui.innerText = `Type: Curve | Radius: ${Math.round(geo.radius)}m | Max Speed: ${Math.round(geo.speedLimit)} km/h`;
+    }
+}
+
+function confirmBuild() {
+    if (GameState.preview && GameState.preview.geometry) {
+        // Carry over the start angle for continuous building logic
+        GameState.preview.geometry.startAngle = GameState.preview.startAngle;
+        GameState.addTrack(GameState.preview.geometry);
+    }
+    cancelBuild();
+}
+
+function cancelBuild() {
+    GameState.preview = null;
+    document.getElementById('preview-ui').classList.add('hidden');
+}
