@@ -3,62 +3,53 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Train Track Builder</title>
+    <title>Train Track Sandbox</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <canvas id="gameCanvas"></canvas>
 
     <div id="toolbar">
-        <button id="btn-pan" class="active">Pan/Zoom</button>
-        <button id="btn-build">Build Track</button>
-        <button id="btn-select">Select</button>
-        <button id="btn-multiselect">Multi-Select</button>
+        <button id="tool-pan" class="active">Pan/Zoom</button>
+        <button id="tool-build">Build Track</button>
+        <button id="tool-select">Select</button>
+        <button id="tool-multi">Multi-Select</button>
         <div class="separator"></div>
-        <label><input type="checkbox" id="toggle-snap" checked> Snapping</label>
-        <label>Parallel Dist (m): <input type="number" id="input-parallel" value="4.0" step="0.1" min="3.5" max="4.0"></label>
+        <label><input type="checkbox" id="toggle-snap" checked> Snap</label>
+        <label>Z (Height): <input type="number" id="current-z" value="0" step="1"></label>
+        <label>Parallel Dist: <input type="number" id="parallel-dist" value="3.5" step="0.1" min="3.5" max="4.0">m</label>
+        <div class="separator"></div>
         <button id="btn-save">Save</button>
         <button id="btn-load">Load</button>
         <button id="btn-export">Export</button>
-        <button id="btn-import">Import</button>
-        <input type="file" id="file-import" style="display:none;" accept=".json">
+        <button id="btn-import-btn">Import</button>
+        <input type="file" id="btn-import" accept=".json" style="display:none;">
     </div>
 
-    <div id="preview-menu" class="hidden popup">
-        <h3>Preview Track</h3>
-        <p>Radius: <span id="prev-radius">0</span> m</p>
-        <p>Gradient: <span id="prev-grad">0</span>%</p>
-        <p>Elevation (Start): <input type="number" id="prev-z-start" value="0" step="0.5">m</p>
-        <p>Elevation (End): <input type="number" id="prev-z-end" value="0" step="0.5">m</p>
-        <button id="btn-confirm-build">Confirm</button>
-        <button id="btn-cancel-build">Cancel</button>
+    <div id="preview-menu" class="hidden floating-menu">
+        <p id="preview-stats">Preview Data</p>
+        <button id="btn-confirm-build">Confirm (✔)</button>
+        <button id="btn-cancel-build">Cancel (X)</button>
     </div>
 
-    <div id="dubins-menu" class="hidden popup">
-        <h3>Dubins Path Config</h3>
-        <button id="btn-dir-start">Toggle Start Dir</button>
-        <button id="btn-dir-end">Toggle End Dir</button>
-        <label>Radius (m): <input type="number" id="input-dubins-radius" value="100"></label>
-        <button id="btn-dubins-apply">Apply</button>
+    <div id="dubins-menu" class="hidden floating-menu">
+        <h4>Complex Connection</h4>
+        <button id="btn-flip-start">Flip Start Direction</button>
+        <button id="btn-flip-end">Flip End Direction</button>
+        <label>Radius (m): <input type="number" id="dubins-radius" value="100"></label>
+        <button id="btn-apply-dubins">Apply Curve</button>
     </div>
 
-    <div id="select-menu" class="hidden popup">
-        <h3>Track Info</h3>
-        <p id="sel-info">Data...</p>
-        <button id="btn-delete-track">Delete Track</button>
-        <button id="btn-close-select">Close</button>
-    </div>
-
-    <div id="multiselect-menu" class="hidden popup">
-        <h3>Multi-Select</h3>
-        <button id="btn-turn-around">Turn Around (Later)</button>
-        <button id="btn-force-one">Force 1 Train Sect</button>
-        <button id="btn-close-multi">Close</button>
+    <div id="select-menu" class="hidden floating-menu">
+        <p id="select-data">Track Data</p>
+        <button id="btn-delete-track">Delete</button>
+        <button id="btn-turn-around" class="hidden">Turn Around</button>
+        <button id="btn-force-one" class="hidden">Force Single Train</button>
     </div>
 
     <script src="math.js"></script>
+    <script src="loadsavedata.js"></script>
     <script src="track.js"></script>
     <script src="render.js"></script>
-    <script src="loadsavedata.js"></script>
 </body>
 </html>
