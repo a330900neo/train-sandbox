@@ -3,380 +3,75 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Train Sandbox Engine</title>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #2c3e50;
-            font-family: sans-serif;
-            touch-action: none; /* Prevent browser pan/zoom on mobile */
-        }
-        #gameCanvas {
-            display: block;
-            width: 100%;
-            height: 100%;
-        }
-        #ui-layer {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            pointer-events: none;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-        .ui-panel {
-            background: rgba(0, 0, 0, 0.8);
-            padding: 10px;
-            border-radius: 8px;
-            pointer-events: auto;
-            color: white;
-        }
-        button {
-            background: #34495e;
-            color: white;
-            border: 1px solid #7f8c8d;
-            padding: 8px 12px;
-            border-radius: 4px;
-            cursor: pointer;
-            margin: 2px;
-            font-size: 14px;
-        }
-        button:hover { background: #2c3e50; }
-        button.active { background: #e67e22; border-color: #d35400; }
-        
-        #preview-controls {
-            display: none;
-            position: absolute;
-            bottom: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(0, 0, 0, 0.8);
-            padding: 15px;
-            border-radius: 8px;
-            pointer-events: auto;
-        }
-        .btn-confirm { background: #27ae60; }
-        .btn-cancel { background: #c0392b; }
-    </style>
+    <title>Train Track Sandbox</title>
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
-
     <canvas id="gameCanvas"></canvas>
-
-    <div id="ui-layer">
-        <div class="ui-panel">
-            <strong>Tools</strong><br>
-            <button id="btn-pan" class="active" onclick="setTool('pan')">Pan / Zoom</button>
-            <button id="btn-build" onclick="setTool('build')">Build Track</button>
-            <button id="btn-select" onclick="setTool('select')">Select / Delete</button>
-        </div>
-        <div class="ui-panel">
-            <strong>System</strong><br>
-            <button onclick="saveGame()">Save</button>
-            <button onclick="loadGame()">Load</button>
+    
+    <div id="ui-container">
+        <div id="toolbar">
+            <button onclick="setTool('pan')">Pan/Zoom</button>
+            <button onclick="setTool('build_track')">Build Track</button>
+            <button onclick="setTool('build_platform')">Build Platform</button>
+            <button onclick="setTool('select')">Select Tool</button>
+            <button onclick="setTool('multi_select')">Multi-Select</button>
+            <div class="separator"></div>
+            <label>Height: <input type="number" id="height-input" value="0" step="1"></label>
+            <label><input type="checkbox" id="snap-toggle" checked> Snap (1.5m)</label>
+            <label>Parallel Dist: <input type="number" id="parallel-dist" value="3.8" step="0.1"></label>
+            <div class="separator"></div>
             <button onclick="exportData()">Export</button>
-            <button onclick="importData()">Import</button>
+            <input type="file" id="import-file" style="display:none" onchange="importData(event)">
+            <button onclick="document.getElementById('import-file').click()">Import</button>
         </div>
-        <div class="ui-panel" id="info-panel">
-            Ready.
+
+        <div id="preview-menu" class="hidden floating-panel">
+            <h3>Preview Track</h3>
+            <div id="preview-stats"></div>
+            <button onclick="confirmPreview()">Confirm</button>
+            <button onclick="cancelPreview()">Cancel</button>
+        </div>
+
+        <div id="dubins-menu" class="hidden floating-panel">
+            <h3>Dubins Connection</h3>
+            <label>Radius (m): <input type="number" id="dubins-radius" value="100"></label>
+            <button onclick="flipDubinsStart()">Flip Start Dir</button>
+            <button onclick="flipDubinsEnd()">Flip End Dir</button>
+            <button onclick="applyDubins()">Apply</button>
+        </div>
+
+        <div id="select-menu" class="hidden floating-panel">
+            <h3>Track Info</h3>
+            <div id="select-stats"></div>
+            <button onclick="deleteSelected()">Delete Track</button>
+            <button onclick="closeMenus()">Close</button>
+        </div>
+
+        <div id="multi-select-menu" class="hidden floating-panel">
+            <h3>Multi-Select</h3>
+            <button onclick="turnAroundSelected()">Turn Around</button>
+            <button onclick="forceSingleTrain()">Force Single Train</button>
+            <button onclick="closeMenus()">Close</button>
         </div>
     </div>
 
-    <div id="preview-controls">
-        <button class="btn-cancel" onclick="cancelPreview()">Cancel</button>
-        <button class="btn-confirm" onclick="confirmPreview()">Confirm Placement</button>
-    </div>
-
-<script>
-    const canvas = document.getElementById('gameCanvas');
-    const ctx = canvas.getContext('2d');
-    
-    // Scale: Let's assume 1 pixel = 0.5 meters to fit things nicely, 
-    // but scale is arbitrary based on zoom.
-    const PIXELS_PER_METER = 2;
-    const GAUGE_PX = 1.435 * PIXELS_PER_METER;
-    const TRACK_WIDTH_PX = 3.2 * PIXELS_PER_METER;
-
-    // Game State
-    let camera = { x: 0, y: 0, zoom: 1 };
-    let currentTool = 'pan'; // pan, build, select
-    let tracks = [];
-    let nodes = [];
-
-    // Interaction State
-    let isDragging = false;
-    let dragStart = { x: 0, y: 0 };
-    let camStart = { x: 0, y: 0 };
-    
-    // Build Preview State
-    let preview = {
-        active: false,
-        startX: 0, startY: 0,
-        endX: 0, endY: 0,
-        height: 0
-    };
-
-    function resize() {
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
-        render();
-    }
-    window.addEventListener('resize', resize);
-    resize();
-
-    // --- UI Controls ---
-    function setTool(tool) {
-        currentTool = tool;
-        document.querySelectorAll('#ui-layer button').forEach(b => b.classList.remove('active'));
-        document.getElementById('btn-' + tool).classList.add('active');
-        cancelPreview();
-        updateInfo("Tool: " + tool);
-    }
-
-    function updateInfo(text) {
-        document.getElementById('info-panel').innerText = text;
-    }
-
-    // --- Core Math & Transform ---
-    function screenToWorld(sx, sy) {
-        return {
-            x: (sx - canvas.width / 2) / camera.zoom - camera.x,
-            y: (sy - canvas.height / 2) / camera.zoom - camera.y
-        };
-    }
-
-    function distance(p1, p2) {
-        return Math.hypot(p2.x - p1.x, p2.y - p1.y);
-    }
-
-    // --- Input Handling (Touch & Mouse unified via Pointer Events) ---
-    canvas.addEventListener('pointerdown', (e) => {
-        isDragging = true;
-        dragStart = { x: e.clientX, y: e.clientY };
-        camStart = { x: camera.x, y: camera.y };
-        
-        let worldPos = screenToWorld(e.clientX, e.clientY);
-
-        if (currentTool === 'build') {
-            if (!preview.active) {
-                // Start a new preview
-                preview.active = true;
-                preview.startX = worldPos.x;
-                preview.startY = worldPos.y;
-                preview.endX = worldPos.x;
-                preview.endY = worldPos.y;
-                document.getElementById('preview-controls').style.display = 'block';
-            } else {
-                // Adjusting end point
-                preview.endX = worldPos.x;
-                preview.endY = worldPos.y;
-            }
-        } else if (currentTool === 'select') {
-            // Simplified selection logic: delete nearest track if close enough
-            let clickedTrackIdx = tracks.findIndex(t => {
-                // VERY basic bounding check (needs proper line-point distance math)
-                let distToStart = distance(worldPos, {x: t.startX, y: t.startY});
-                let distToEnd = distance(worldPos, {x: t.endX, y: t.endY});
-                return distToStart < 20 || distToEnd < 20 || (distToStart + distToEnd < distance({x:t.startX, y:t.startY}, {x:t.endX, y:t.endY}) + 5);
-            });
-            if (clickedTrackIdx > -1) {
-                tracks.splice(clickedTrackIdx, 1);
-                updateInfo("Track deleted.");
-                render();
-            }
+    <script src="math.js"></script>
+    <script src="track.js"></script>
+    <script src="render.js"></script>
+    <script src="loadsavedata.js"></script>
+    <script>
+        // Init logic
+        const canvas = document.getElementById('gameCanvas');
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
         }
-    });
-
-    canvas.addEventListener('pointermove', (e) => {
-        if (!isDragging) return;
-
-        if (currentTool === 'pan') {
-            let dx = (e.clientX - dragStart.x) / camera.zoom;
-            let dy = (e.clientY - dragStart.y) / camera.zoom;
-            camera.x = camStart.x + dx;
-            camera.y = camStart.y + dy;
-        } else if (currentTool === 'build' && preview.active) {
-            let worldPos = screenToWorld(e.clientX, e.clientY);
-            preview.endX = worldPos.x;
-            preview.endY = worldPos.y;
-            
-            // Auto-straighten if radius > 20000m (simulated here as a distance snap)
-            let dist = distance({x: preview.startX, y: preview.startY}, worldPos);
-            updateInfo(`Preview Length: ${(dist/PIXELS_PER_METER).toFixed(1)}m`);
-        }
-        render();
-    });
-
-    canvas.addEventListener('pointerup', () => {
-        isDragging = false;
-    });
-
-    // Zooming
-    canvas.addEventListener('wheel', (e) => {
-        let zoomAmount = e.deltaY > 0 ? 0.9 : 1.1;
-        camera.zoom *= zoomAmount;
-        camera.zoom = Math.max(0.1, Math.min(camera.zoom, 5)); // clamp
-        render();
-    });
-
-    // --- Build Logic ---
-    function confirmPreview() {
-        if (!preview.active) return;
+        window.addEventListener('resize', resize);
+        resize();
         
-        // Add to track array
-        tracks.push({
-            id: Date.now(),
-            startX: preview.startX,
-            startY: preview.startY,
-            endX: preview.endX,
-            endY: preview.endY,
-            height: preview.height,
-            type: 'straight' // Placeholder for Dubins/Arc logic
-        });
-        
-        cancelPreview();
-        render();
-    }
-
-    function cancelPreview() {
-        preview.active = false;
-        document.getElementById('preview-controls').style.display = 'none';
-        updateInfo("Build cancelled.");
-        render();
-    }
-
-    // --- Rendering ---
-    function drawTrack(startX, startY, endX, endY, isPreview = false) {
-        ctx.beginPath();
-        ctx.moveTo(startX, startY);
-        ctx.lineTo(endX, endY);
-        
-        // Base gray track
-        ctx.lineWidth = TRACK_WIDTH_PX;
-        ctx.strokeStyle = isPreview ? 'rgba(149, 165, 166, 0.5)' : '#7f8c8d';
-        ctx.lineCap = 'round';
-        ctx.stroke();
-
-        // Rails
-        ctx.beginPath();
-        let dx = endX - startX;
-        let dy = endY - startY;
-        let len = Math.hypot(dx, dy);
-        if (len === 0) return;
-        
-        let nx = -dy / len;
-        let ny = dx / len;
-        
-        let halfGauge = GAUGE_PX / 2;
-        
-        // Rail 1
-        ctx.moveTo(startX + nx * halfGauge, startY + ny * halfGauge);
-        ctx.lineTo(endX + nx * halfGauge, endY + ny * halfGauge);
-        // Rail 2
-        ctx.moveTo(startX - nx * halfGauge, startY - ny * halfGauge);
-        ctx.lineTo(endX - nx * halfGauge, endY - ny * halfGauge);
-        
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = isPreview ? 'rgba(236, 240, 241, 0.5)' : '#ecf0f1';
-        ctx.stroke();
-    }
-
-    function render() {
-        // Clear screen
-        ctx.fillStyle = '#2c3e50';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        ctx.save();
-        
-        // Apply Camera Transform
-        ctx.translate(canvas.width / 2, canvas.height / 2);
-        ctx.scale(camera.zoom, camera.zoom);
-        ctx.translate(camera.x, camera.y);
-
-        // Draw Grid
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
-        ctx.lineWidth = 1 / camera.zoom;
-        const gridSize = 50;
-        let startX = -camera.x - (canvas.width/2)/camera.zoom;
-        let endX = -camera.x + (canvas.width/2)/camera.zoom;
-        let startY = -camera.y - (canvas.height/2)/camera.zoom;
-        let endY = -camera.y + (canvas.height/2)/camera.zoom;
-        
-        startX = Math.floor(startX / gridSize) * gridSize;
-        startY = Math.floor(startY / gridSize) * gridSize;
-
-        ctx.beginPath();
-        for(let x = startX; x < endX; x += gridSize) { ctx.moveTo(x, startY); ctx.lineTo(x, endY); }
-        for(let y = startY; y < endY; y += gridSize) { ctx.moveTo(startX, y); ctx.lineTo(endX, y); }
-        ctx.stroke();
-
-        // Draw Placed Tracks
-        tracks.forEach(t => {
-            drawTrack(t.startX, t.startY, t.endX, t.endY, false);
-        });
-
-        // Draw Preview Track
-        if (currentTool === 'build' && preview.active) {
-            drawTrack(preview.startX, preview.startY, preview.endX, preview.endY, true);
-            
-            // Draw drag handles
-            ctx.fillStyle = '#f1c40f';
-            ctx.beginPath(); ctx.arc(preview.startX, preview.startY, 5 / camera.zoom, 0, Math.PI*2); ctx.fill();
-            ctx.fillStyle = '#e74c3c';
-            ctx.beginPath(); ctx.arc(preview.endX, preview.endY, 5 / camera.zoom, 0, Math.PI*2); ctx.fill();
-        }
-
-        ctx.restore();
-    }
-
-    // --- Save / Load System ---
-    function saveGame() {
-        localStorage.setItem('trainSandboxSave', JSON.stringify({ tracks, camera }));
-        updateInfo("Game Saved locally.");
-    }
-    function loadGame() {
-        let data = localStorage.getItem('trainSandboxSave');
-        if(data) {
-            let parsed = JSON.parse(data);
-            tracks = parsed.tracks || [];
-            camera = parsed.camera || {x:0, y:0, zoom:1};
-            render();
-            updateInfo("Game Loaded.");
-        } else {
-            updateInfo("No save found.");
-        }
-    }
-    function exportData() {
-        let dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(tracks));
-        let dlAnchorElem = document.createElement('a');
-        dlAnchorElem.setAttribute("href", dataStr);
-        dlAnchorElem.setAttribute("download", "train_tracks.json");
-        dlAnchorElem.click();
-    }
-    function importData() {
-        let input = document.createElement('input');
-        input.type = 'file';
-        input.accept = 'application/json';
-        input.onchange = e => { 
-            let file = e.target.files[0]; 
-            let reader = new FileReader();
-            reader.readAsText(file,'UTF-8');
-            reader.onload = readerEvent => {
-                tracks = JSON.parse(readerEvent.target.result);
-                render();
-                updateInfo("Data Imported.");
-            }
-        }
-        input.click();
-    }
-
-    // Initial render
-    render();
-</script>
+        // Start engine
+        requestAnimationFrame(renderLoop);
+    </script>
 </body>
 </html>
