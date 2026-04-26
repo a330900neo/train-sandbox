@@ -3,523 +3,380 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>2D Train Sandbox</title>
+    <title>Train Sandbox Engine</title>
     <style>
-        body { margin: 0; padding: 0; overflow: hidden; background: #2c3e50; color: white; font-family: sans-serif; user-select: none; touch-action: none; }
-        canvas { display: block; touch-action: none; }
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #2c3e50;
+            font-family: sans-serif;
+            touch-action: none; /* Prevent browser pan/zoom on mobile */
+        }
+        #gameCanvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .ui-panel {
+            background: rgba(0, 0, 0, 0.8);
+            padding: 10px;
+            border-radius: 8px;
+            pointer-events: auto;
+            color: white;
+        }
+        button {
+            background: #34495e;
+            color: white;
+            border: 1px solid #7f8c8d;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 2px;
+            font-size: 14px;
+        }
+        button:hover { background: #2c3e50; }
+        button.active { background: #e67e22; border-color: #d35400; }
         
-        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
-        .panel { background: rgba(0,0,0,0.8); padding: 10px; border-radius: 8px; pointer-events: auto; box-shadow: 0 4px 6px rgba(0,0,0,0.3); backdrop-filter: blur(4px); }
-        
-        #toolbar { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; z-index: 10;}
-        .btn { background: #34495e; color: white; border: 2px solid transparent; padding: 10px 15px; border-radius: 5px; cursor: pointer; font-weight: bold; transition: 0.2s; white-space: nowrap; }
-        .btn:hover { background: #455a64; }
-        .btn.active { border-color: #3498db; background: #2980b9; }
-        .btn.danger { background: #e74c3c; }
-        .btn.success { background: #2ecc71; color: #000; }
-        
-        #preview-panel { position: absolute; top: 20px; left: 20px; display: none; width: 250px; z-index: 10;}
-        #preview-data { font-family: monospace; font-size: 14px; margin-bottom: 10px; color: #bdc3c7;}
-        .preview-controls { display: flex; gap: 10px; }
-        
-        #context-menu { position: absolute; display: none; z-index: 20; }
-        
-        #top-bar { position: absolute; top: 20px; right: 20px; display: flex; gap: 10px; pointer-events: auto;}
-        
-        /* Checkbox styling */
-        .toggle-container { display: flex; align-items: center; gap: 5px; background: #34495e; padding: 5px 10px; border-radius: 5px; pointer-events: auto;}
+        #preview-controls {
+            display: none;
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border-radius: 8px;
+            pointer-events: auto;
+        }
+        .btn-confirm { background: #27ae60; }
+        .btn-cancel { background: #c0392b; }
     </style>
 </head>
 <body>
 
-<canvas id="gameCanvas"></canvas>
+    <canvas id="gameCanvas"></canvas>
 
-<div id="ui-layer">
-    <div id="toolbar">
-        <button class="btn active" id="btn-pan" onclick="setMode('pan')">Pan / Zoom</button>
-        <button class="btn" id="btn-build" onclick="setMode('build_track')">Build Track</button>
-        <button class="btn" id="btn-platform" onclick="setMode('build_platform')">Build Platform</button>
-        <button class="btn" id="btn-select" onclick="setMode('select')">Select</button>
-        <button class="btn" id="btn-multiselect" onclick="setMode('multi_select')">Multi-Select</button>
-        <div class="toggle-container">
-            <input type="checkbox" id="snap-toggle" checked>
-            <label for="snap-toggle">Snapping</label>
+    <div id="ui-layer">
+        <div class="ui-panel">
+            <strong>Tools</strong><br>
+            <button id="btn-pan" class="active" onclick="setTool('pan')">Pan / Zoom</button>
+            <button id="btn-build" onclick="setTool('build')">Build Track</button>
+            <button id="btn-select" onclick="setTool('select')">Select / Delete</button>
+        </div>
+        <div class="ui-panel">
+            <strong>System</strong><br>
+            <button onclick="saveGame()">Save</button>
+            <button onclick="loadGame()">Load</button>
+            <button onclick="exportData()">Export</button>
+            <button onclick="importData()">Import</button>
+        </div>
+        <div class="ui-panel" id="info-panel">
+            Ready.
         </div>
     </div>
 
-    <div id="preview-panel" class="panel">
-        <div id="preview-data">
-            Radius: --<br>
-            Speed: --<br>
-            Gradient: --
-        </div>
-        <div>
-            <label>Start H:</label> <input type="number" id="h-start" value="0" style="width: 50px;">
-            <label>End H:</label> <input type="number" id="h-end" value="0" style="width: 50px;">
-        </div>
-        <div class="preview-controls" style="margin-top: 10px;">
-            <button class="btn success" style="flex:1;" onclick="confirmBuild()">Confirm</button>
-            <button class="btn danger" style="flex:1;" onclick="cancelBuild()">Cancel</button>
-        </div>
+    <div id="preview-controls">
+        <button class="btn-cancel" onclick="cancelPreview()">Cancel</button>
+        <button class="btn-confirm" onclick="confirmPreview()">Confirm Placement</button>
     </div>
-
-    <div id="context-menu" class="panel">
-        <div id="ctx-data" style="margin-bottom:10px; font-size:12px;"></div>
-        <button class="btn danger" id="btn-delete" style="width:100%;">Delete</button>
-        <div id="multi-tools" style="display:none; margin-top:10px;">
-            <button class="btn" style="width:100%; margin-bottom:5px;">Turn Around</button>
-            <button class="btn" style="width:100%;">One Train Block</button>
-        </div>
-    </div>
-
-    <div id="top-bar">
-        <button class="btn" onclick="exportData()">Export</button>
-        <button class="btn" onclick="document.getElementById('import-file').click()">Import</button>
-        <input type="file" id="import-file" style="display:none" accept=".json" onchange="importData(event)">
-    </div>
-</div>
 
 <script>
-/**
- * Game Settings & Constants
- * Scale: 1 meter = 5 pixels
- */
-const SCALE = 5; 
-const GAUGE = 1.435 * SCALE; // 1435mm
-const TRAIN_WIDTH = 3.2 * SCALE;
-const MAX_RADIUS_STRAIGHT = 20000; // Snap to straight if radius > 20000m
-
-const canvas = document.getElementById('gameCanvas');
-const ctx = canvas.getContext('2d');
-
-let width, height;
-function resize() {
-    width = window.innerWidth;
-    height = window.innerHeight;
-    canvas.width = width;
-    canvas.height = height;
-}
-window.addEventListener('resize', resize);
-resize();
-
-/**
- * State Management
- */
-let state = {
-    mode: 'pan', // pan, build_track, build_platform, select, multi_select
-    cam: { x: 0, y: 0, zoom: 1 },
-    tracks: [],
-    platforms: [],
-    selectedIds: [],
-    snapping: true,
-    preview: null // { p1: {x,y,h,dir}, p2: {x,y,h}, dragging: null, geom: {} }
-};
-
-// Generate UUID
-function uuid() { return Math.random().toString(36).substr(2, 9); }
-
-/**
- * Math & Geometry Helpers
- */
-// Screen to World
-function s2w(sx, sy) {
-    return {
-        x: (sx - width / 2) / state.cam.zoom - state.cam.x,
-        y: (sy - height / 2) / state.cam.zoom - state.cam.y
-    };
-}
-// World to Screen
-function w2s(wx, wy) {
-    return {
-        x: (wx + state.cam.x) * state.cam.zoom + width / 2,
-        y: (wy + state.cam.y) * state.cam.zoom + height / 2
-    };
-}
-function dist(p1, p2) { return Math.hypot(p2.x - p1.x, p2.y - p1.y); }
-
-// Calculate Arc routing taking tangent of P1, aiming for P2
-// Returns geometry data
-function calculateTrackGeometry(p1, p2, isPlatform = false) {
-    let dx = p2.x - p1.x;
-    let dy = p2.y - p1.y;
-    let d = Math.hypot(dx, dy);
-
-    if (d < 1) return null;
-
-    // If P1 has no forced direction, assume straight line to P2
-    if (p1.dir === undefined || p1.dir === null) {
-        let angle = Math.atan2(dy, dx);
-        return { type: 'straight', x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, length: d, dir1: angle, dir2: angle, radius: Infinity };
-    }
-
-    // Arc Calculation
-    let dirX = Math.cos(p1.dir);
-    let dirY = Math.sin(p1.dir);
-    let normX = -dirY;
-    let normY = dirX;
-
-    let distToTangent = dx * normX + dy * normY;
-
-    // Straight snap or infinite radius
-    if (Math.abs(distToTangent) < 0.1 || Math.abs(dx*dirX + dy*dirY) < 0.1) {
-        return { type: 'straight', x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, length: d, dir1: p1.dir, dir2: p1.dir, radius: Infinity };
-    }
-
-    let radius = (dx * dx + dy * dy) / (2 * distToTangent);
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
     
-    if (Math.abs(radius) / SCALE > MAX_RADIUS_STRAIGHT) {
-        return { type: 'straight', x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, length: d, dir1: p1.dir, dir2: p1.dir, radius: Infinity };
-    }
+    // Scale: Let's assume 1 pixel = 0.5 meters to fit things nicely, 
+    // but scale is arbitrary based on zoom.
+    const PIXELS_PER_METER = 2;
+    const GAUGE_PX = 1.435 * PIXELS_PER_METER;
+    const TRACK_WIDTH_PX = 3.2 * PIXELS_PER_METER;
 
-    let cx = p1.x + normX * radius;
-    let cy = p1.y + normY * radius;
+    // Game State
+    let camera = { x: 0, y: 0, zoom: 1 };
+    let currentTool = 'pan'; // pan, build, select
+    let tracks = [];
+    let nodes = [];
 
-    let startAngle = Math.atan2(p1.y - cy, p1.x - cx);
-    let endAngle = Math.atan2(p2.y - cy, p2.x - cx);
-    let ccw = radius < 0;
+    // Interaction State
+    let isDragging = false;
+    let dragStart = { x: 0, y: 0 };
+    let camStart = { x: 0, y: 0 };
     
-    let absRadius = Math.abs(radius);
-
-    // Calculate tangent at end point
-    let dir2 = endAngle + (ccw ? -Math.PI/2 : Math.PI/2);
-
-    // Shortest arc length
-    let angleDiff = endAngle - startAngle;
-    if (ccw && angleDiff > 0) angleDiff -= Math.PI * 2;
-    if (!ccw && angleDiff < 0) angleDiff += Math.PI * 2;
-    let length = absRadius * Math.abs(angleDiff);
-
-    return { type: 'arc', cx, cy, radius: absRadius, startAngle, endAngle, ccw, length, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, dir1: p1.dir, dir2 };
-}
-
-/**
- * Snapping Logic
- */
-function findSnapPoint(wx, wy) {
-    if (!document.getElementById('snap-toggle').checked) return null;
-    let threshold = 20 / state.cam.zoom;
-    let best = null;
-    let bestDist = threshold;
-
-    let checkNode = (track, x, y, h, dir) => {
-        let d = dist({x: wx, y: wy}, {x, y});
-        if (d < bestDist) { bestDist = d; best = {x, y, h, dir, trackId: track.id}; }
+    // Build Preview State
+    let preview = {
+        active: false,
+        startX: 0, startY: 0,
+        endX: 0, endY: 0,
+        height: 0
     };
 
-    [...state.tracks, ...state.platforms].forEach(t => {
-        // Snap to start
-        checkNode(t, t.geom.x1, t.geom.y1, t.h1, t.geom.dir1 + Math.PI); // Inverse direction for attaching
-        // Snap to end
-        checkNode(t, t.geom.x2, t.geom.y2, t.h2, t.geom.dir2);
-        
-        // Simplified: Middle/parallel snapping omitted to keep script size feasible. 
-        // Focus is on End-to-End connection
-    });
-    return best;
-}
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        render();
+    }
+    window.addEventListener('resize', resize);
+    resize();
 
-/**
- * Interactions
- */
-let isDragging = false;
-let dragType = null; // 'pan', 'p1', 'p2'
-let lastPtr = {x: 0, y: 0};
+    // --- UI Controls ---
+    function setTool(tool) {
+        currentTool = tool;
+        document.querySelectorAll('#ui-layer button').forEach(b => b.classList.remove('active'));
+        document.getElementById('btn-' + tool).classList.add('active');
+        cancelPreview();
+        updateInfo("Tool: " + tool);
+    }
 
-canvas.addEventListener('pointerdown', (e) => {
-    let w = s2w(e.clientX, e.clientY);
-    lastPtr = {x: e.clientX, y: e.clientY};
+    function updateInfo(text) {
+        document.getElementById('info-panel').innerText = text;
+    }
 
-    document.getElementById('context-menu').style.display = 'none';
-
-    if (state.mode === 'pan') {
-        isDragging = true;
-        dragType = 'pan';
-    } 
-    else if (state.mode === 'build_track' || state.mode === 'build_platform') {
-        // Check if clicking existing preview handles
-        if (state.preview) {
-            if (dist(w, state.preview.p1) < 15 / state.cam.zoom) {
-                isDragging = true; dragType = 'p1'; return;
-            }
-            if (dist(w, state.preview.p2) < 15 / state.cam.zoom) {
-                isDragging = true; dragType = 'p2'; return;
-            }
-        }
-        // Start new preview
-        let snap = findSnapPoint(w.x, w.y);
-        let p1 = snap ? {x: snap.x, y: snap.y, h: snap.h, dir: snap.dir} : {x: w.x, y: w.y, h: 0, dir: null};
-        
-        state.preview = {
-            isPlatform: state.mode === 'build_platform',
-            p1: p1,
-            p2: {x: w.x, y: w.y, h: p1.h},
-            geom: null
+    // --- Core Math & Transform ---
+    function screenToWorld(sx, sy) {
+        return {
+            x: (sx - canvas.width / 2) / camera.zoom - camera.x,
+            y: (sy - canvas.height / 2) / camera.zoom - camera.y
         };
+    }
+
+    function distance(p1, p2) {
+        return Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    }
+
+    // --- Input Handling (Touch & Mouse unified via Pointer Events) ---
+    canvas.addEventListener('pointerdown', (e) => {
         isDragging = true;
-        dragType = 'p2';
-        document.getElementById('preview-panel').style.display = 'block';
-        updatePreviewUI();
-    }
-    else if (state.mode === 'select' || state.mode === 'multi_select') {
-        // Simple bounding box selection for demo
-        let clicked = [...state.tracks, ...state.platforms].find(t => dist(w, {x: (t.geom.x1+t.geom.x2)/2, y: (t.geom.y1+t.geom.y2)/2}) < 30 / state.cam.zoom);
+        dragStart = { x: e.clientX, y: e.clientY };
+        camStart = { x: camera.x, y: camera.y };
         
-        if (state.mode === 'select') state.selectedIds = clicked ? [clicked.id] : [];
-        if (state.mode === 'multi_select' && clicked) {
-            if (state.selectedIds.includes(clicked.id)) state.selectedIds = state.selectedIds.filter(id => id !== clicked.id);
-            else state.selectedIds.push(clicked.id);
-        }
+        let worldPos = screenToWorld(e.clientX, e.clientY);
 
-        if (state.selectedIds.length > 0) {
-            let ctxMenu = document.getElementById('context-menu');
-            ctxMenu.style.display = 'block';
-            ctxMenu.style.left = e.clientX + 'px';
-            ctxMenu.style.top = e.clientY + 'px';
-            document.getElementById('multi-tools').style.display = state.selectedIds.length > 1 ? 'block' : 'none';
-            document.getElementById('btn-delete').onclick = () => {
-                state.tracks = state.tracks.filter(t => !state.selectedIds.includes(t.id));
-                state.platforms = state.platforms.filter(t => !state.selectedIds.includes(t.id));
-                state.selectedIds = [];
-                ctxMenu.style.display = 'none';
-            };
-        }
-    }
-});
-
-window.addEventListener('pointermove', (e) => {
-    let w = s2w(e.clientX, e.clientY);
-    let dx = e.clientX - lastPtr.x;
-    let dy = e.clientY - lastPtr.y;
-    lastPtr = {x: e.clientX, y: e.clientY};
-
-    if (isDragging) {
-        if (dragType === 'pan') {
-            state.cam.x += dx / state.cam.zoom;
-            state.cam.y += dy / state.cam.zoom;
-        } 
-        else if (dragType === 'p1' || dragType === 'p2') {
-            let p = dragType === 'p1' ? state.preview.p1 : state.preview.p2;
-            let snap = findSnapPoint(w.x, w.y);
-            if (snap) {
-                p.x = snap.x; p.y = snap.y; p.h = snap.h;
-                if (dragType === 'p1') p.dir = snap.dir;
+        if (currentTool === 'build') {
+            if (!preview.active) {
+                // Start a new preview
+                preview.active = true;
+                preview.startX = worldPos.x;
+                preview.startY = worldPos.y;
+                preview.endX = worldPos.x;
+                preview.endY = worldPos.y;
+                document.getElementById('preview-controls').style.display = 'block';
             } else {
-                p.x = w.x; p.y = w.y;
-                if (dragType === 'p1') p.dir = null;
+                // Adjusting end point
+                preview.endX = worldPos.x;
+                preview.endY = worldPos.y;
             }
-            state.preview.geom = calculateTrackGeometry(state.preview.p1, state.preview.p2, state.preview.isPlatform);
-            updatePreviewUI();
+        } else if (currentTool === 'select') {
+            // Simplified selection logic: delete nearest track if close enough
+            let clickedTrackIdx = tracks.findIndex(t => {
+                // VERY basic bounding check (needs proper line-point distance math)
+                let distToStart = distance(worldPos, {x: t.startX, y: t.startY});
+                let distToEnd = distance(worldPos, {x: t.endX, y: t.endY});
+                return distToStart < 20 || distToEnd < 20 || (distToStart + distToEnd < distance({x:t.startX, y:t.startY}, {x:t.endX, y:t.endY}) + 5);
+            });
+            if (clickedTrackIdx > -1) {
+                tracks.splice(clickedTrackIdx, 1);
+                updateInfo("Track deleted.");
+                render();
+            }
         }
-    }
-});
+    });
 
-window.addEventListener('pointerup', () => { isDragging = false; dragType = null; });
-canvas.addEventListener('wheel', (e) => {
-    let zoomFactor = 1.1;
-    let oldZoom = state.cam.zoom;
-    if (e.deltaY < 0) state.cam.zoom *= zoomFactor;
-    else state.cam.zoom /= zoomFactor;
-    
-    // Zoom around mouse
-    let w = s2w(e.clientX, e.clientY);
-    state.cam.x -= (e.clientX - width/2) * (1/oldZoom - 1/state.cam.zoom);
-    state.cam.y -= (e.clientY - height/2) * (1/oldZoom - 1/state.cam.zoom);
-});
+    canvas.addEventListener('pointermove', (e) => {
+        if (!isDragging) return;
 
-/**
- * UI Controls
- */
-function setMode(m) {
-    state.mode = m;
-    document.querySelectorAll('#toolbar .btn').forEach(b => b.classList.remove('active'));
-    document.getElementById(`btn-${m.replace('_','').toLowerCase()}`).classList.add('active');
-    
-    if (!m.startsWith('build')) cancelBuild();
-    state.selectedIds = [];
-    document.getElementById('context-menu').style.display = 'none';
-}
+        if (currentTool === 'pan') {
+            let dx = (e.clientX - dragStart.x) / camera.zoom;
+            let dy = (e.clientY - dragStart.y) / camera.zoom;
+            camera.x = camStart.x + dx;
+            camera.y = camStart.y + dy;
+        } else if (currentTool === 'build' && preview.active) {
+            let worldPos = screenToWorld(e.clientX, e.clientY);
+            preview.endX = worldPos.x;
+            preview.endY = worldPos.y;
+            
+            // Auto-straighten if radius > 20000m (simulated here as a distance snap)
+            let dist = distance({x: preview.startX, y: preview.startY}, worldPos);
+            updateInfo(`Preview Length: ${(dist/PIXELS_PER_METER).toFixed(1)}m`);
+        }
+        render();
+    });
 
-function updatePreviewUI() {
-    if (!state.preview || !state.preview.geom) return;
-    let g = state.preview.geom;
-    let h1 = parseFloat(document.getElementById('h-start').value);
-    let h2 = parseFloat(document.getElementById('h-end').value);
-    state.preview.p1.h = h1;
-    state.preview.p2.h = h2;
+    canvas.addEventListener('pointerup', () => {
+        isDragging = false;
+    });
 
-    let radStr = g.radius === Infinity ? 'Straight' : (g.radius / SCALE).toFixed(1) + ' m';
-    let grad = g.length > 0 ? ((h2 - h1) / (g.length / SCALE) * 100).toFixed(1) : 0;
-    
-    // Speed limit: min 160, decrease if radius is small
-    let speed = g.radius === Infinity ? 160 : Math.min(160, Math.sqrt((g.radius/SCALE) * 127 * 0.15)).toFixed(0);
+    // Zooming
+    canvas.addEventListener('wheel', (e) => {
+        let zoomAmount = e.deltaY > 0 ? 0.9 : 1.1;
+        camera.zoom *= zoomAmount;
+        camera.zoom = Math.max(0.1, Math.min(camera.zoom, 5)); // clamp
+        render();
+    });
 
-    document.getElementById('preview-data').innerHTML = `
-        Radius: ${radStr}<br>
-        Speed: ${speed} km/h<br>
-        Gradient: ${grad}%<br>
-        Length: ${(g.length / SCALE).toFixed(1)} m
-    `;
-}
-
-function confirmBuild() {
-    if (!state.preview || !state.preview.geom) return;
-    let t = {
-        id: uuid(),
-        isPlatform: state.preview.isPlatform,
-        p1: {...state.preview.p1},
-        p2: {...state.preview.p2},
-        geom: state.preview.geom,
-        h1: state.preview.p1.h,
-        h2: state.preview.p2.h
-    };
-    if (t.isPlatform) state.platforms.push(t);
-    else state.tracks.push(t);
-    
-    // Auto-continue from end point
-    state.preview.p1 = {x: t.p2.x, y: t.p2.y, h: t.h2, dir: t.geom.dir2};
-    state.preview.p2 = {x: t.p2.x + 50, y: t.p2.y + 50, h: t.h2};
-    state.preview.geom = calculateTrackGeometry(state.preview.p1, state.preview.p2);
-    document.getElementById('h-start').value = t.h2;
-    document.getElementById('h-end').value = t.h2;
-    updatePreviewUI();
-}
-
-function cancelBuild() {
-    state.preview = null;
-    document.getElementById('preview-panel').style.display = 'none';
-}
-
-/**
- * Rendering
- */
-function drawGeom(g, isPlatform, isSelected, isPreview) {
-    if (!g) return;
-    
-    ctx.lineWidth = isPlatform ? 20 * SCALE : 3 * SCALE;
-    ctx.lineCap = 'butt';
-    
-    // Base style
-    if (isPreview) {
-        ctx.strokeStyle = 'rgba(46, 204, 113, 0.5)';
-        if(isPlatform) ctx.strokeStyle = 'rgba(241, 196, 15, 0.5)';
-    } else if (isSelected) {
-        ctx.strokeStyle = '#e74c3c';
-    } else {
-        ctx.strokeStyle = isPlatform ? '#7f8c8d' : '#95a5a6'; // Gray base
-    }
-
-    ctx.beginPath();
-    if (g.type === 'straight') {
-        ctx.moveTo(g.x1, g.y1);
-        ctx.lineTo(g.x2, g.y2);
-    } else {
-        ctx.arc(g.cx, g.cy, g.radius, g.startAngle, g.endAngle, g.ccw);
-    }
-    ctx.stroke();
-
-    // Draw rails if track
-    if (!isPlatform && !isPreview && !isSelected) {
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = '#2c3e50';
+    // --- Build Logic ---
+    function confirmPreview() {
+        if (!preview.active) return;
         
-        if (g.type === 'straight') {
-            let dx = Math.cos(g.dir1 + Math.PI/2) * (GAUGE/2);
-            let dy = Math.sin(g.dir1 + Math.PI/2) * (GAUGE/2);
-            ctx.beginPath(); ctx.moveTo(g.x1+dx, g.y1+dy); ctx.lineTo(g.x2+dx, g.y2+dy); ctx.stroke();
-            ctx.beginPath(); ctx.moveTo(g.x1-dx, g.y1-dy); ctx.lineTo(g.x2-dx, g.y2-dy); ctx.stroke();
+        // Add to track array
+        tracks.push({
+            id: Date.now(),
+            startX: preview.startX,
+            startY: preview.startY,
+            endX: preview.endX,
+            endY: preview.endY,
+            height: preview.height,
+            type: 'straight' // Placeholder for Dubins/Arc logic
+        });
+        
+        cancelPreview();
+        render();
+    }
+
+    function cancelPreview() {
+        preview.active = false;
+        document.getElementById('preview-controls').style.display = 'none';
+        updateInfo("Build cancelled.");
+        render();
+    }
+
+    // --- Rendering ---
+    function drawTrack(startX, startY, endX, endY, isPreview = false) {
+        ctx.beginPath();
+        ctx.moveTo(startX, startY);
+        ctx.lineTo(endX, endY);
+        
+        // Base gray track
+        ctx.lineWidth = TRACK_WIDTH_PX;
+        ctx.strokeStyle = isPreview ? 'rgba(149, 165, 166, 0.5)' : '#7f8c8d';
+        ctx.lineCap = 'round';
+        ctx.stroke();
+
+        // Rails
+        ctx.beginPath();
+        let dx = endX - startX;
+        let dy = endY - startY;
+        let len = Math.hypot(dx, dy);
+        if (len === 0) return;
+        
+        let nx = -dy / len;
+        let ny = dx / len;
+        
+        let halfGauge = GAUGE_PX / 2;
+        
+        // Rail 1
+        ctx.moveTo(startX + nx * halfGauge, startY + ny * halfGauge);
+        ctx.lineTo(endX + nx * halfGauge, endY + ny * halfGauge);
+        // Rail 2
+        ctx.moveTo(startX - nx * halfGauge, startY - ny * halfGauge);
+        ctx.lineTo(endX - nx * halfGauge, endY - ny * halfGauge);
+        
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = isPreview ? 'rgba(236, 240, 241, 0.5)' : '#ecf0f1';
+        ctx.stroke();
+    }
+
+    function render() {
+        // Clear screen
+        ctx.fillStyle = '#2c3e50';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.save();
+        
+        // Apply Camera Transform
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.scale(camera.zoom, camera.zoom);
+        ctx.translate(camera.x, camera.y);
+
+        // Draw Grid
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+        ctx.lineWidth = 1 / camera.zoom;
+        const gridSize = 50;
+        let startX = -camera.x - (canvas.width/2)/camera.zoom;
+        let endX = -camera.x + (canvas.width/2)/camera.zoom;
+        let startY = -camera.y - (canvas.height/2)/camera.zoom;
+        let endY = -camera.y + (canvas.height/2)/camera.zoom;
+        
+        startX = Math.floor(startX / gridSize) * gridSize;
+        startY = Math.floor(startY / gridSize) * gridSize;
+
+        ctx.beginPath();
+        for(let x = startX; x < endX; x += gridSize) { ctx.moveTo(x, startY); ctx.lineTo(x, endY); }
+        for(let y = startY; y < endY; y += gridSize) { ctx.moveTo(startX, y); ctx.lineTo(endX, y); }
+        ctx.stroke();
+
+        // Draw Placed Tracks
+        tracks.forEach(t => {
+            drawTrack(t.startX, t.startY, t.endX, t.endY, false);
+        });
+
+        // Draw Preview Track
+        if (currentTool === 'build' && preview.active) {
+            drawTrack(preview.startX, preview.startY, preview.endX, preview.endY, true);
+            
+            // Draw drag handles
+            ctx.fillStyle = '#f1c40f';
+            ctx.beginPath(); ctx.arc(preview.startX, preview.startY, 5 / camera.zoom, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = '#e74c3c';
+            ctx.beginPath(); ctx.arc(preview.endX, preview.endY, 5 / camera.zoom, 0, Math.PI*2); ctx.fill();
+        }
+
+        ctx.restore();
+    }
+
+    // --- Save / Load System ---
+    function saveGame() {
+        localStorage.setItem('trainSandboxSave', JSON.stringify({ tracks, camera }));
+        updateInfo("Game Saved locally.");
+    }
+    function loadGame() {
+        let data = localStorage.getItem('trainSandboxSave');
+        if(data) {
+            let parsed = JSON.parse(data);
+            tracks = parsed.tracks || [];
+            camera = parsed.camera || {x:0, y:0, zoom:1};
+            render();
+            updateInfo("Game Loaded.");
         } else {
-            ctx.beginPath(); ctx.arc(g.cx, g.cy, g.radius + (GAUGE/2) * (g.ccw ? -1 : 1), g.startAngle, g.endAngle, g.ccw); ctx.stroke();
-            ctx.beginPath(); ctx.arc(g.cx, g.cy, g.radius - (GAUGE/2) * (g.ccw ? -1 : 1), g.startAngle, g.endAngle, g.ccw); ctx.stroke();
+            updateInfo("No save found.");
         }
     }
-}
-
-function drawHandle(x, y) {
-    ctx.fillStyle = '#3498db';
-    ctx.beginPath();
-    ctx.arc(x, y, 6 / state.cam.zoom, 0, Math.PI*2);
-    ctx.fill();
-    ctx.strokeStyle = 'white';
-    ctx.lineWidth = 2 / state.cam.zoom;
-    ctx.stroke();
-}
-
-function render() {
-    ctx.clearRect(0, 0, width, height);
-    
-    // Grid
-    ctx.save();
-    ctx.translate(width/2 + state.cam.x * state.cam.zoom, height/2 + state.cam.y * state.cam.zoom);
-    ctx.scale(state.cam.zoom, state.cam.zoom);
-    
-    ctx.strokeStyle = '#34495e';
-    ctx.lineWidth = 1 / state.cam.zoom;
-    let step = 50; // 10 meters grid
-    let startX = -state.cam.x - (width/2)/state.cam.zoom;
-    let endX = startX + width/state.cam.zoom;
-    let startY = -state.cam.y - (height/2)/state.cam.zoom;
-    let endY = startY + height/state.cam.zoom;
-
-    ctx.beginPath();
-    for (let x = Math.floor(startX/step)*step; x < endX; x+=step) { ctx.moveTo(x, startY); ctx.lineTo(x, endY); }
-    for (let y = Math.floor(startY/step)*step; y < endY; y+=step) { ctx.moveTo(startX, y); ctx.lineTo(endX, y); }
-    ctx.stroke();
-
-    // Elements
-    state.platforms.forEach(t => drawGeom(t.geom, true, state.selectedIds.includes(t.id), false));
-    state.tracks.forEach(t => drawGeom(t.geom, false, state.selectedIds.includes(t.id), false));
-
-    // Preview
-    if (state.preview) {
-        drawGeom(state.preview.geom, state.preview.isPlatform, false, true);
-        drawHandle(state.preview.p1.x, state.preview.p1.y);
-        drawHandle(state.preview.p2.x, state.preview.p2.y);
+    function exportData() {
+        let dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(tracks));
+        let dlAnchorElem = document.createElement('a');
+        dlAnchorElem.setAttribute("href", dataStr);
+        dlAnchorElem.setAttribute("download", "train_tracks.json");
+        dlAnchorElem.click();
+    }
+    function importData() {
+        let input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'application/json';
+        input.onchange = e => { 
+            let file = e.target.files[0]; 
+            let reader = new FileReader();
+            reader.readAsText(file,'UTF-8');
+            reader.onload = readerEvent => {
+                tracks = JSON.parse(readerEvent.target.result);
+                render();
+                updateInfo("Data Imported.");
+            }
+        }
+        input.click();
     }
 
-    ctx.restore();
-    requestAnimationFrame(render);
-}
-
-// Start Render Loop
-render();
-
-/**
- * Data Export / Import
- */
-function exportData() {
-    let dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify({
-        tracks: state.tracks,
-        platforms: state.platforms
-    }));
-    let node = document.createElement('a');
-    node.setAttribute("href", dataStr);
-    node.setAttribute("download", "train_sandbox_save.json");
-    document.body.appendChild(node);
-    node.click();
-    node.remove();
-}
-
-function importData(event) {
-    let file = event.target.files[0];
-    if (!file) return;
-    let reader = new FileReader();
-    reader.onload = function(e) {
-        try {
-            let data = JSON.parse(e.target.result);
-            state.tracks = data.tracks || [];
-            state.platforms = data.platforms || [];
-            setMode('pan');
-        } catch(err) {
-            alert("Invalid save file");
-        }
-    };
-    reader.readAsText(file);
-}
-
-// Handle inputs for preview h-start/h-end updates
-document.getElementById('h-start').addEventListener('change', updatePreviewUI);
-document.getElementById('h-end').addEventListener('change', updatePreviewUI);
-
+    // Initial render
+    render();
 </script>
 </body>
 </html>
