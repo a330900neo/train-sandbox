@@ -3,75 +3,62 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Train Track Sandbox</title>
+    <title>Train Track Builder</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <canvas id="gameCanvas"></canvas>
-    
-    <div id="ui-container">
-        <div id="toolbar">
-            <button onclick="setTool('pan')">Pan/Zoom</button>
-            <button onclick="setTool('build_track')">Build Track</button>
-            <button onclick="setTool('build_platform')">Build Platform</button>
-            <button onclick="setTool('select')">Select Tool</button>
-            <button onclick="setTool('multi_select')">Multi-Select</button>
-            <div class="separator"></div>
-            <label>Height: <input type="number" id="height-input" value="0" step="1"></label>
-            <label><input type="checkbox" id="snap-toggle" checked> Snap (1.5m)</label>
-            <label>Parallel Dist: <input type="number" id="parallel-dist" value="3.8" step="0.1"></label>
-            <div class="separator"></div>
-            <button onclick="exportData()">Export</button>
-            <input type="file" id="import-file" style="display:none" onchange="importData(event)">
-            <button onclick="document.getElementById('import-file').click()">Import</button>
-        </div>
 
-        <div id="preview-menu" class="hidden floating-panel">
-            <h3>Preview Track</h3>
-            <div id="preview-stats"></div>
-            <button onclick="confirmPreview()">Confirm</button>
-            <button onclick="cancelPreview()">Cancel</button>
-        </div>
+    <div id="toolbar">
+        <button id="btn-pan" class="active">Pan/Zoom</button>
+        <button id="btn-build">Build Track</button>
+        <button id="btn-select">Select</button>
+        <button id="btn-multiselect">Multi-Select</button>
+        <div class="separator"></div>
+        <label><input type="checkbox" id="toggle-snap" checked> Snapping</label>
+        <label>Parallel Dist (m): <input type="number" id="input-parallel" value="4.0" step="0.1" min="3.5" max="4.0"></label>
+        <button id="btn-save">Save</button>
+        <button id="btn-load">Load</button>
+        <button id="btn-export">Export</button>
+        <button id="btn-import">Import</button>
+        <input type="file" id="file-import" style="display:none;" accept=".json">
+    </div>
 
-        <div id="dubins-menu" class="hidden floating-panel">
-            <h3>Dubins Connection</h3>
-            <label>Radius (m): <input type="number" id="dubins-radius" value="100"></label>
-            <button onclick="flipDubinsStart()">Flip Start Dir</button>
-            <button onclick="flipDubinsEnd()">Flip End Dir</button>
-            <button onclick="applyDubins()">Apply</button>
-        </div>
+    <div id="preview-menu" class="hidden popup">
+        <h3>Preview Track</h3>
+        <p>Radius: <span id="prev-radius">0</span> m</p>
+        <p>Gradient: <span id="prev-grad">0</span>%</p>
+        <p>Elevation (Start): <input type="number" id="prev-z-start" value="0" step="0.5">m</p>
+        <p>Elevation (End): <input type="number" id="prev-z-end" value="0" step="0.5">m</p>
+        <button id="btn-confirm-build">Confirm</button>
+        <button id="btn-cancel-build">Cancel</button>
+    </div>
 
-        <div id="select-menu" class="hidden floating-panel">
-            <h3>Track Info</h3>
-            <div id="select-stats"></div>
-            <button onclick="deleteSelected()">Delete Track</button>
-            <button onclick="closeMenus()">Close</button>
-        </div>
+    <div id="dubins-menu" class="hidden popup">
+        <h3>Dubins Path Config</h3>
+        <button id="btn-dir-start">Toggle Start Dir</button>
+        <button id="btn-dir-end">Toggle End Dir</button>
+        <label>Radius (m): <input type="number" id="input-dubins-radius" value="100"></label>
+        <button id="btn-dubins-apply">Apply</button>
+    </div>
 
-        <div id="multi-select-menu" class="hidden floating-panel">
-            <h3>Multi-Select</h3>
-            <button onclick="turnAroundSelected()">Turn Around</button>
-            <button onclick="forceSingleTrain()">Force Single Train</button>
-            <button onclick="closeMenus()">Close</button>
-        </div>
+    <div id="select-menu" class="hidden popup">
+        <h3>Track Info</h3>
+        <p id="sel-info">Data...</p>
+        <button id="btn-delete-track">Delete Track</button>
+        <button id="btn-close-select">Close</button>
+    </div>
+
+    <div id="multiselect-menu" class="hidden popup">
+        <h3>Multi-Select</h3>
+        <button id="btn-turn-around">Turn Around (Later)</button>
+        <button id="btn-force-one">Force 1 Train Sect</button>
+        <button id="btn-close-multi">Close</button>
     </div>
 
     <script src="math.js"></script>
     <script src="track.js"></script>
     <script src="render.js"></script>
     <script src="loadsavedata.js"></script>
-    <script>
-        // Init logic
-        const canvas = document.getElementById('gameCanvas');
-        function resize() {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
-        }
-        window.addEventListener('resize', resize);
-        resize();
-        
-        // Start engine
-        requestAnimationFrame(renderLoop);
-    </script>
 </body>
 </html>
