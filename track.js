@@ -1,84 +1,174 @@
-// Data structures for tracks
 class Node {
-    constructor(x, y, z = 0) {
-        this.id = crypto.randomUUID();
-        this.x = x; this.y = y; this.z = z;
-        this.connections = []; // Array of TrackSegment IDs
+    constructor(x, y, z) {
+        this.pos = new Vector2(x, y);
+        this.z = z;
+        this.connections = []; // Array of Segment references
     }
 }
 
-class TrackSegment {
-    constructor(n1, n2, type, radius = Infinity) {
-        this.id = crypto.randomUUID();
-        this.n1 = n1; // Start Node ID
-        this.n2 = n2; // End Node ID
-        this.type = type; // 'straight', 'curve'
-        this.radius = radius;
-        this.speedLimit = MathUtils.calcSpeedLimit(radius);
-        this.isOneTrainOnly = false;
+class Segment {
+    constructor(n1, n2, type, data) {
+        this.n1 = n1;
+        this.n2 = n2;
+        this.type = type; // 'straight' or 'arc'
+        this.data = data; // { radius, center, length, ccw }
+        this.forceSingleTrain = false;
+        
+        n1.connections.push(this);
+        n2.connections.push(this);
     }
 }
 
-const TrackManager = {
-    nodes: {},
-    segments: {},
-    
-    addNode: function(x, y, z) {
-        let n = new Node(x, y, z);
-        this.nodes[n.id] = n;
-        return n;
-    },
+class TrackManager {
+    constructor() {
+        this.nodes = [];
+        this.segments = [];
+        this.gauge = 1.435; // Standard gauge
+        this.trainWidth = 3.2; 
+        
+        // State
+        this.mode = 'pan'; // pan, build, select, multi
+        this.preview = null; // { p1, p2, dir1, z, dragNode: 1|2|null, path: [] }
+        this.selection = [];
+    }
 
-    addSegment: function(n1, n2, type, radius) {
-        // Enforce 3m - 40m segmentation rule
-        let dist = MathUtils.distance2D(this.nodes[n1], this.nodes[n2]);
-        if (dist > 40) {
-            // Needs splitting (simplified logic for straight)
-            let midX = (this.nodes[n1].x + this.nodes[n2].x) / 2;
-            let midY = (this.nodes[n1].y + this.nodes[n2].y) / 2;
-            let midZ = (this.nodes[n1].z + this.nodes[n2].z) / 2;
-            let midNode = this.addNode(midX, midY, midZ);
-            this.addSegment(n1, midNode.id, type, radius);
-            this.addSegment(midNode.id, n2, type, radius);
-            return;
+    setMode(mode) {
+        this.mode = mode;
+        this.preview = null;
+        this.selection = [];
+        document.getElementById('preview-menu').classList.add('hidden');
+        document.getElementById('dubins-menu').classList.add('hidden');
+        document.getElementById('select-menu').classList.add('hidden');
+    }
+
+    startPreview(worldPos, z) {
+        let startPos = worldPos;
+        let dir = new Vector2(1, 0); // Default dir
+        
+        if (document.getElementById('toggle-snap').checked) {
+            const snap = this.findSnap(worldPos);
+            if (snap) {
+                startPos = snap.pos;
+                dir = snap.dir;
+                z = snap.z;
+            }
         }
 
-        let seg = new TrackSegment(n1, n2, type, radius);
-        this.nodes[n1].connections.push(seg.id);
-        this.nodes[n2].connections.push(seg.id);
-        this.segments[seg.id] = seg;
-    },
+        this.preview = {
+            p1: startPos, p2: startPos.add(new Vector2(10, 0)),
+            dir1: dir, z: z, dragNode: 2, path: []
+        };
+        this.updatePreview();
+    }
 
-    deleteSegment: function(id) {
-        if (!this.segments[id]) return;
-        let seg = this.segments[id];
-        // Remove connections from nodes
-        this.nodes[seg.n1].connections = this.nodes[seg.n1].connections.filter(sId => sId !== id);
-        this.nodes[seg.n2].connections = this.nodes[seg.n2].connections.filter(sId => sId !== id);
-        delete this.segments[id];
-        // Cleanup orphaned nodes
-        if (this.nodes[seg.n1].connections.length === 0) delete this.nodes[seg.n1];
-        if (this.nodes[seg.n2].connections.length === 0) delete this.nodes[seg.n2];
-    },
+    updatePreview(worldPos = null) {
+        if (!this.preview) return;
+        
+        if (worldPos && this.preview.dragNode === 2) {
+            this.preview.p2 = worldPos;
+            if (document.getElementById('toggle-snap').checked) {
+                const snap = this.findSnap(worldPos);
+                if (snap) this.preview.p2 = snap.pos; // Simple endpoint snap
+            }
+        }
 
-    // Snapping logic (1.5m radius)
-    findSnapNode: function(x, y) {
-        let closest = null;
-        let minDist = 1.5; // 1.5m snapping radius
-        for (let id in this.nodes) {
-            let d = MathUtils.distance2D({x, y}, this.nodes[id]);
-            if (d < minDist) { minDist = d; closest = this.nodes[id]; }
+        const path = MathUtils.fitArc(this.preview.p1, this.preview.dir1, this.preview.p2);
+        this.preview.path = [path]; // For advanced, use solveConnection
+
+        // Update UI
+        const menu = document.getElementById('preview-menu');
+        menu.classList.remove('hidden');
+        const speed = MathUtils.calcSpeedLimit(path.radius);
+        document.getElementById('preview-stats').innerText = 
+            `L: ${Math.round(path.length)}m | R: ${path.type === 'straight' ? '∞' : Math.round(path.radius)}m\n` +
+            `Max Speed: ${speed} km/h | Elevation: ${this.preview.z}`;
+    }
+
+    confirmBuild() {
+        if (!this.preview || this.preview.path.length === 0) return;
+        
+        // Subdivision Logic (Segments must be 3m to 40m)
+        this.preview.path.forEach(p => {
+            const numSegments = Math.ceil(p.length / 40);
+            let lastNode = new Node(p.p1.x, p.p1.y, this.preview.z);
+            this.nodes.push(lastNode);
+
+            for (let i = 1; i <= numSegments; i++) {
+                const t = i / numSegments;
+                // Interpolate pos (Simplified straight interp here, arc interp needs angle math)
+                let nx = p.p1.x + (p.p2.x - p.p1.x) * t;
+                let ny = p.p1.y + (p.p2.y - p.p1.y) * t;
+                let newNode = new Node(nx, ny, this.preview.z);
+                this.nodes.push(newNode);
+                
+                let seg = new Segment(lastNode, newNode, p.type, {
+                    radius: p.radius, center: p.center, ccw: p.ccw, length: p.length / numSegments
+                });
+                this.segments.push(seg);
+                lastNode = newNode;
+            }
+        });
+
+        this.preview = null;
+        document.getElementById('preview-menu').classList.add('hidden');
+    }
+
+    cancelBuild() {
+        this.preview = null;
+        document.getElementById('preview-menu').classList.add('hidden');
+    }
+
+    findSnap(pos) {
+        const snapRadius = 1.5;
+        let closest = null, minDist = Infinity;
+        
+        // Node snapping
+        for (let node of this.nodes) {
+            const d = node.pos.dist(pos);
+            if (d < snapRadius && d < minDist) {
+                minDist = d;
+                closest = { pos: node.pos, z: node.z, dir: new Vector2(1,0) }; // Derive dir from segments
+                if (node.connections.length > 0) {
+                    const seg = node.connections[0];
+                    const other = seg.n1 === node ? seg.n2 : seg.n1;
+                    closest.dir = node.pos.sub(other.pos).norm(); // outward tangent
+                }
+            }
         }
         return closest;
-    },
-
-    // Parallel snapping and cross detection skeletons
-    findParallelSnap: function(x, y, parallelDist) {
-        // Logic to find point parallel to existing track curve/straight
-        return null;
-    },
-    
-    checkCrossings: function(newSegment) {
-        // Logic to detect if new track intersects existing at SAME Z height -> form cross
     }
-};
+
+    selectTrack(worldPos) {
+        // Find clicked segment
+        this.selection = [];
+        let minDist = Infinity;
+        for (let seg of this.segments) {
+            const d = Math.min(seg.n1.pos.dist(worldPos), seg.n2.pos.dist(worldPos)); // approximation
+            if (d < 5 && d < minDist) {
+                minDist = d;
+                this.selection = [seg];
+            }
+        }
+        
+        if (this.selection.length > 0) {
+            document.getElementById('select-menu').classList.remove('hidden');
+            const s = this.selection[0];
+            document.getElementById('select-data').innerText = `Track Type: ${s.type}`;
+        } else {
+            document.getElementById('select-menu').classList.add('hidden');
+        }
+    }
+
+    deleteSelection() {
+        this.selection.forEach(seg => {
+            this.segments = this.segments.filter(s => s !== seg);
+            seg.n1.connections = seg.n1.connections.filter(s => s !== seg);
+            seg.n2.connections = seg.n2.connections.filter(s => s !== seg);
+        });
+        this.selection = [];
+        document.getElementById('select-menu').classList.add('hidden');
+    }
+}
+
+// Global Instance
+const TrackSys = new TrackManager();
