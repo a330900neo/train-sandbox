@@ -3,47 +3,37 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Railway Builder</title>
+    <title>Railway Builder Pro</title>
+    
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-    <div id="map"></div>
-
     <div id="ui-container">
         <div class="toolbar">
-            <button id="btn-pan" class="active">Pan / Zoom</button>
+            <button id="btn-pan" class="active">Pan/Zoom</button>
             <button id="btn-build">Build Track</button>
-            <button id="btn-select">Select Tool</button>
+            <button id="btn-select">Select/Edit</button>
         </div>
         
-        <div id="info-panel" class="hidden">
-            <h3>Track Info</h3>
-            <p id="info-length">Length: -</p>
-            <p id="info-radius">Radius: -</p>
-            <p id="info-speed">Max Speed: -</p>
-            <hr>
-            <div id="select-options" class="hidden">
-                <label>Layer: <input type="number" id="prop-layer" value="1" min="1"></label>
-                <label><input type="checkbox" id="prop-ramp"> Is Ramp</label>
-                <label>Platform: 
-                    <select id="prop-platform">
-                        <option value="none">None</option>
-                        <option value="left">Left Only</option>
-                        <option value="right">Right Only</option>
-                        <option value="both">Both Sides</option>
-                    </select>
-                </label>
-                <label>Platform Width (m): <input type="number" id="prop-plat-width" value="3"></label>
-                <label><input type="checkbox" id="prop-turnback"> Turnback Track</label>
-                <label><input type="checkbox" id="prop-oneway"> One-Way Only</label>
-            </div>
+        <div id="build-info" class="info-panel hidden">
+            <h3>Preview Info</h3>
+            <p>Length: <span id="info-length">0</span> m</p>
+            <p>Radius: <span id="info-radius">Straight</span></p>
+            <p>Max Speed: <span id="info-speed">160</span> km/h</p>
+        </div>
+
+        <div id="layer-controls">
+            <label>Current Layer: <input type="number" id="current-layer" value="0" min="-5" max="5"></label>
         </div>
     </div>
 
+    <div id="map"></div>
+
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="math.js"></script>
-    <script src="track.js"></script>
+    
+    <script src="geometry.js"></script>
+    <script src="tracks.js"></script>
     <script src="main.js"></script>
 </body>
 </html>
