@@ -1,167 +1,115 @@
-// --- 1. Init Leaflet Map ---
-// Setting default to a real location (e.g., Hong Kong)
-const map = L.map('map', { zoomControl: false }).setView([22.3193, 114.1694], 16);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 22,
-    attribution: '© OpenStreetMap'
-}).addTo(map);
+// Global Map Variable
+let map;
+let currentMode = 'pan'; // pan, build, select
+let buildState = { startPoint: null, previewLine: null };
+let currentLayer = 0;
 
-// --- 2. Custom Canvas Overlay ---
-const canvas = document.createElement('canvas');
-canvas.classList.add('leaflet-custom-canvas');
-canvas.style.position = 'absolute';
-canvas.style.top = '0';
-canvas.style.left = '0';
-canvas.style.zIndex = '400'; // Above map, below UI
-document.getElementById('map').appendChild(canvas);
+function init() {
+    // Initialize map centered on a real-world location (e.g., Central, Hong Kong)
+    map = L.map('map', {
+        center: [22.2819, 114.1581],
+        zoom: 16,
+        zoomControl: false // Hide default to keep UI clean
+    });
 
-const ctx = canvas.getContext('2d');
+    // Add OpenStreetMap tiles
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '© OpenStreetMap'
+    }).addTo(map);
 
-function resizeCanvas() {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-    render();
-}
-window.addEventListener('resize', resizeCanvas);
-map.on('move', render);
-map.on('zoom', render);
-
-// --- 3. Game State ---
-let tracks = [];
-let mode = 'pan'; // pan, build, select
-let buildState = { active: false, startNode: null, currentPos: null };
-let selectedTracks = [];
-
-// --- 4. Input Handling (Pointer Events for Mobile & Desktop) ---
-map.getContainer().addEventListener('pointerdown', (e) => {
-    if (mode === 'pan') return; // Let Leaflet handle it natively
-
-    let latlng = map.containerPointToLatLng([e.clientX, e.clientY]);
-    let projected = map.project(latlng, map.getMaxZoom()); // EPSG:3857 Meters
-
-    if (mode === 'build') {
-        let snapped = MathUtils.getSnapPoint(projected, tracks);
-        buildState.active = true;
-        buildState.startNode = snapped ? snapped : projected;
-        map.dragging.disable(); // Stop map from panning while building
-    } else if (mode === 'select') {
-        // Raycast selection logic
-        selectedTracks.forEach(t => t.selected = false);
-        selectedTracks = [];
-        
-        let searchDist = 10 * Math.pow(2, 22 - map.getZoom()); // Adjust hit box by zoom
-        let hit = tracks.find(t => MathUtils.dist(projected, t.startNode) < searchDist || MathUtils.dist(projected, t.endNode) < searchDist);
-        
-        if (hit) {
-            hit.selected = true;
-            selectedTracks.push(hit);
-            showSelectUI(hit);
-        } else {
-            document.getElementById('select-options').classList.add('hidden');
-        }
-        render();
-    }
-});
-
-map.getContainer().addEventListener('pointermove', (e) => {
-    if (!buildState.active || mode !== 'build') return;
-
-    let latlng = map.containerPointToLatLng([e.clientX, e.clientY]);
-    let projected = map.project(latlng, map.getMaxZoom());
-    
-    buildState.currentPos = MathUtils.getSnapPoint(projected, tracks) || projected;
-    
-    // Update Preview UI
-    let length = MathUtils.dist(buildState.startNode, buildState.currentPos);
-    let radius = MathUtils.STRAIGHT_THRESHOLD + 1; // Simplified: defaulting to straight for preview
-    document.getElementById('info-length').innerText = `Length: ${length.toFixed(2)}m`;
-    document.getElementById('info-radius').innerText = `Radius: Straight`;
-    document.getElementById('info-speed').innerText = `Max Speed: ${MathUtils.calcMaxSpeed(radius)} km/h`;
-    
-    render();
-});
-
-map.getContainer().addEventListener('pointerup', (e) => {
-    if (mode === 'build' && buildState.active) {
-        if (buildState.currentPos && MathUtils.dist(buildState.startNode, buildState.currentPos) > 1) {
-            // Commit Track
-            let newTrack = new Track(buildState.startNode, buildState.currentPos);
-            newTrack.length = MathUtils.dist(buildState.startNode, buildState.currentPos);
-            tracks.push(newTrack);
-        }
-        buildState.active = false;
-        buildState.startNode = null;
-        buildState.currentPos = null;
-        map.dragging.enable();
-        render();
-    }
-});
-
-// --- 5. Rendering Loop ---
-function render() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    // Draw confirmed tracks
-    tracks.forEach(track => track.draw(ctx, map));
-
-    // Draw Build Preview
-    if (mode === 'build' && buildState.active && buildState.currentPos) {
-        let p1 = map.latLngToContainerPoint(map.unproject(buildState.startNode, map.getMaxZoom()));
-        let p2 = map.latLngToContainerPoint(map.unproject(buildState.currentPos, map.getMaxZoom()));
-
-        ctx.strokeStyle = 'rgba(0, 255, 100, 0.8)'; // Green preview line
-        ctx.lineWidth = 4;
-        ctx.setLineDash([10, 10]);
-        ctx.beginPath();
-        ctx.moveTo(p1.x, p1.y);
-        ctx.lineTo(p2.x, p2.y);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        
-        // Draw snap indicator if snapped
-        if (buildState.currentPos.type === 'node') {
-            ctx.fillStyle = 'red';
-            ctx.beginPath();
-            ctx.arc(p2.x, p2.y, 6, 0, Math.PI * 2);
-            ctx.fill();
-        }
-    }
+    setupUI();
+    setupMapEvents();
 }
 
-// --- 6. UI Handlers ---
-document.getElementById('btn-pan').onclick = (e) => setMode('pan', e.target);
-document.getElementById('btn-build').onclick = (e) => setMode('build', e.target);
-document.getElementById('btn-select').onclick = (e) => setMode('select', e.target);
+function setupUI() {
+    const btnPan = document.getElementById('btn-pan');
+    const btnBuild = document.getElementById('btn-build');
+    const btnSelect = document.getElementById('btn-select');
+    const infoPanel = document.getElementById('build-info');
 
-function setMode(newMode, buttonExt) {
-    mode = newMode;
-    document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('active'));
-    buttonExt.classList.add('active');
+    btnPan.addEventListener('click', () => {
+        setMode('pan');
+        btnPan.classList.add('active');
+        btnBuild.classList.remove('active');
+        btnSelect.classList.remove('active');
+        infoPanel.classList.add('hidden');
+    });
+
+    btnBuild.addEventListener('click', () => {
+        setMode('build');
+        btnBuild.classList.add('active');
+        btnPan.classList.remove('active');
+        btnSelect.classList.remove('active');
+        infoPanel.classList.remove('hidden');
+    });
     
+    document.getElementById('current-layer').addEventListener('change', (e) => {
+        currentLayer = parseInt(e.target.value);
+    });
+}
+
+function setMode(mode) {
+    currentMode = mode;
+    buildState.startPoint = null;
+    
+    if (buildState.previewLine) {
+        map.removeLayer(buildState.previewLine);
+        buildState.previewLine = null;
+    }
+
     if (mode === 'pan') {
         map.dragging.enable();
-        document.getElementById('info-panel').classList.add('hidden');
+        document.getElementById('map').style.cursor = 'grab';
     } else {
-        map.dragging.disable();
-        document.getElementById('info-panel').classList.remove('hidden');
-        if (mode === 'build') document.getElementById('select-options').classList.add('hidden');
+        map.dragging.disable(); // Disable panning while building
+        document.getElementById('map').style.cursor = 'crosshair';
     }
 }
 
-function showSelectUI(track) {
-    document.getElementById('select-options').classList.remove('hidden');
-    document.getElementById('info-length').innerText = `Length: ${track.length.toFixed(2)}m`;
-    
-    document.getElementById('prop-layer').value = track.layer;
-    document.getElementById('prop-ramp').checked = track.isRamp;
-    document.getElementById('prop-platform').value = track.platform;
-    document.getElementById('prop-plat-width').value = track.platformWidth;
-    document.getElementById('prop-oneway').checked = track.isOneWay;
-    document.getElementById('prop-turnback').checked = track.isTurnback;
-    
-    // Bind updates
-    document.getElementById('prop-platform').onchange = (e) => { track.platform = e.target.value; render(); };
+function setupMapEvents() {
+    map.on('click', function(e) {
+        if (currentMode !== 'build') return;
+
+        let clickLatLng = e.latlng;
+        
+        // Snapping Check
+        let snapNode = TrackManager.findSnapNode(clickLatLng);
+        if (snapNode) clickLatLng = snapNode;
+
+        if (!buildState.startPoint) {
+            // First click: Set start point
+            buildState.startPoint = clickLatLng;
+        } else {
+            // Second click: Finalize track
+            TrackManager.addTrack(buildState.startPoint, clickLatLng, currentLayer, false, null);
+            buildState.startPoint = null; // Reset for next track
+            if (buildState.previewLine) map.removeLayer(buildState.previewLine);
+        }
+    });
+
+    map.on('mousemove', function(e) {
+        if (currentMode !== 'build' || !buildState.startPoint) return;
+
+        let currentLatLng = e.latlng;
+        
+        // Snapping Check during preview
+        let snapNode = TrackManager.findSnapNode(currentLatLng);
+        if (snapNode) currentLatLng = snapNode;
+
+        // Update Preview Line
+        if (buildState.previewLine) {
+            buildState.previewLine.setLatLngs([buildState.startPoint, currentLatLng]);
+        } else {
+            buildState.previewLine = L.polyline([buildState.startPoint, currentLatLng], TrackManager.styles.preview).addTo(map);
+        }
+
+        // Update UI Info
+        let length = Geometry.calculateDistance(buildState.startPoint, currentLatLng);
+        document.getElementById('info-length').innerText = Math.round(length);
+        document.getElementById('info-speed').innerText = Geometry.calculateMaxSpeed(null); // Straight line max speed
+    });
 }
 
-// Initial Setup
-resizeCanvas();
+// Start the game
+window.onload = init;
