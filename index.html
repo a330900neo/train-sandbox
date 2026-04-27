@@ -2,64 +2,56 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>Real-World Railway Builder</title>
-    
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="stylesheet" href="style.css" />
-    
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Railway Builder</title>
+    <script src="https://unpkg.com/maplibre-gl@3.3.1/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@3.3.1/dist/maplibre-gl.css" rel="stylesheet" />
+    <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <div id="map"></div>
 
-    <div id="toolbar" class="ui-panel">
-        <button id="btn-build" class="active">Build Track</button>
+    <div id="toolbar">
+        <button id="btn-pan" class="active">Pan & Zoom</button>
+        <button id="btn-build">Build Track</button>
         <button id="btn-select">Select / Edit</button>
-        
-        <div class="separator"></div>
-        
-        <label>Layer:</label>
-        <select id="layer-select">
-            <option value="0">Layer 0 (Ground)</option>
-            <option value="1">Layer 1 (Elevated)</option>
-            <option value="2">Layer 2 (High)</option>
-        </select>
+        <div class="layer-control">
+            <label>Layer:</label>
+            <input type="number" id="current-layer" value="1" min="1" max="5">
+        </div>
     </div>
 
-    <div id="preview-panel" class="ui-panel hidden">
+    <div id="preview-info" class="hidden panel">
         <h3>Track Preview</h3>
         <p>Length: <span id="info-length">0</span> m</p>
         <p>Radius: <span id="info-radius">Straight</span></p>
         <p>Max Speed: <span id="info-speed">160</span> km/h</p>
-        
-        <div class="controls">
-            <label>Arc Radius (m): <input type="number" id="input-radius" value="500"></label>
-            <label>Parallel Snap (m): <input type="number" id="input-parallel" value="3.5" step="0.1"></label>
-            <button id="btn-flip">Flip Direction</button>
-            <button id="btn-confirm-build" class="primary">Confirm Build</button>
-            <button id="btn-cancel-build">Cancel</button>
+        <div class="arc-controls hidden" id="arc-controls">
+            <label>Arc 1 Radius: <input type="number" id="arc1-radius" value="500"></label>
+            <label>Arc 2 Radius: <input type="number" id="arc2-radius" value="500"></label>
+            <button id="btn-flip-dir">Flip Direction</button>
         </div>
+        <button id="btn-confirm-build" class="primary">Confirm Build</button>
     </div>
 
-    <div id="edit-panel" class="ui-panel hidden">
-        <h3>Edit Track</h3>
-        <label>Speed Limit (km/h): <input type="number" id="edit-speed"></label>
-        <label><input type="checkbox" id="edit-turnback"> Turnback Track</label>
-        <label><input type="checkbox" id="edit-oneway"> One-Way</label>
-        
-        <h4>Platform Settings</h4>
-        <select id="edit-platform">
+    <div id="properties-panel" class="hidden panel">
+        <h3>Track Properties</h3>
+        <label>Speed Limit (km/h): <input type="number" id="prop-speed" value="160" max="160"></label>
+        <label><input type="checkbox" id="prop-turnback"> Turnback Track</label>
+        <label><input type="checkbox" id="prop-oneway"> One Way</label>
+        <button id="btn-switch-dir">Switch Direction</button>
+        <hr>
+        <h4>Platforms</h4>
+        <select id="prop-platform-side">
             <option value="none">None</option>
-            <option value="both">Both Sides</option>
             <option value="left">Left Only</option>
             <option value="right">Right Only</option>
+            <option value="both">Both</option>
         </select>
-        <label>Width (m): <input type="number" id="edit-platform-width" value="3.0"></label>
+        <label>Width (m): <input type="number" id="prop-platform-width" value="3" step="0.5"></label>
     </div>
 
-    <script src="math_utils.js"></script>
-    <script src="game.js"></script>
+    <script type="module" src="app.js"></script>
 </body>
 </html>
