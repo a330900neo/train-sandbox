@@ -3,53 +3,47 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Train Track Sandbox</title>
+    <title>Railway Builder</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <canvas id="gameCanvas"></canvas>
+    <div id="map"></div>
 
-    <div id="toolbar">
-        <button id="tool-pan" class="active">Pan/Zoom</button>
-        <button id="tool-build">Build Track</button>
-        <button id="tool-select">Select</button>
-        <button id="tool-multi">Multi-Select</button>
-        <div class="separator"></div>
-        <label><input type="checkbox" id="toggle-snap" checked> Snap</label>
-        <label>Z (Height): <input type="number" id="current-z" value="0" step="1"></label>
-        <label>Parallel Dist: <input type="number" id="parallel-dist" value="3.5" step="0.1" min="3.5" max="4.0">m</label>
-        <div class="separator"></div>
-        <button id="btn-save">Save</button>
-        <button id="btn-load">Load</button>
-        <button id="btn-export">Export</button>
-        <button id="btn-import-btn">Import</button>
-        <input type="file" id="btn-import" accept=".json" style="display:none;">
+    <div id="ui-container">
+        <div class="toolbar">
+            <button id="btn-pan" class="active">Pan / Zoom</button>
+            <button id="btn-build">Build Track</button>
+            <button id="btn-select">Select Tool</button>
+        </div>
+        
+        <div id="info-panel" class="hidden">
+            <h3>Track Info</h3>
+            <p id="info-length">Length: -</p>
+            <p id="info-radius">Radius: -</p>
+            <p id="info-speed">Max Speed: -</p>
+            <hr>
+            <div id="select-options" class="hidden">
+                <label>Layer: <input type="number" id="prop-layer" value="1" min="1"></label>
+                <label><input type="checkbox" id="prop-ramp"> Is Ramp</label>
+                <label>Platform: 
+                    <select id="prop-platform">
+                        <option value="none">None</option>
+                        <option value="left">Left Only</option>
+                        <option value="right">Right Only</option>
+                        <option value="both">Both Sides</option>
+                    </select>
+                </label>
+                <label>Platform Width (m): <input type="number" id="prop-plat-width" value="3"></label>
+                <label><input type="checkbox" id="prop-turnback"> Turnback Track</label>
+                <label><input type="checkbox" id="prop-oneway"> One-Way Only</label>
+            </div>
+        </div>
     </div>
 
-    <div id="preview-menu" class="hidden floating-menu">
-        <p id="preview-stats">Preview Data</p>
-        <button id="btn-confirm-build">Confirm (✔)</button>
-        <button id="btn-cancel-build">Cancel (X)</button>
-    </div>
-
-    <div id="dubins-menu" class="hidden floating-menu">
-        <h4>Complex Connection</h4>
-        <button id="btn-flip-start">Flip Start Direction</button>
-        <button id="btn-flip-end">Flip End Direction</button>
-        <label>Radius (m): <input type="number" id="dubins-radius" value="100"></label>
-        <button id="btn-apply-dubins">Apply Curve</button>
-    </div>
-
-    <div id="select-menu" class="hidden floating-menu">
-        <p id="select-data">Track Data</p>
-        <button id="btn-delete-track">Delete</button>
-        <button id="btn-turn-around" class="hidden">Turn Around</button>
-        <button id="btn-force-one" class="hidden">Force Single Train</button>
-    </div>
-
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="math.js"></script>
-    <script src="loadsavedata.js"></script>
     <script src="track.js"></script>
-    <script src="render.js"></script>
+    <script src="main.js"></script>
 </body>
 </html>
