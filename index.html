@@ -3,37 +3,42 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Railway Builder Pro</title>
-    
+    <title>Real-Scale Railway Builder</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-    <div id="ui-container">
-        <div class="toolbar">
-            <button id="btn-pan" class="active">Pan/Zoom</button>
-            <button id="btn-build">Build Track</button>
-            <button id="btn-select">Select/Edit</button>
-        </div>
-        
-        <div id="build-info" class="info-panel hidden">
-            <h3>Preview Info</h3>
-            <p>Length: <span id="info-length">0</span> m</p>
-            <p>Radius: <span id="info-radius">Straight</span></p>
-            <p>Max Speed: <span id="info-speed">160</span> km/h</p>
-        </div>
+    <div id="map"></div>
+    <canvas id="trackCanvas"></canvas>
 
-        <div id="layer-controls">
-            <label>Current Layer: <input type="number" id="current-layer" value="0" min="-5" max="5"></label>
+    <div id="toolbar" class="ui-panel">
+        <button id="btn-build" class="active">Build Track</button>
+        <button id="btn-select">Select / Edit</button>
+        <div id="selection-tools" class="hidden">
+            <label>Speed Limit (km/h): <input type="number" id="edit-speed" max="160"></label>
+            <label>Platforms: 
+                <select id="edit-platform">
+                    <option value="none">None</option>
+                    <option value="both">Both Sides</option>
+                    <option value="left">Left Only</option>
+                    <option value="right">Right Only</option>
+                </select>
+            </label>
+            <label>Layer: <input type="number" id="edit-layer" value="0" min="0" max="5"></label>
+            <button id="btn-oneway">Toggle One-Way</button>
         </div>
     </div>
 
-    <div id="map"></div>
+    <div id="preview-info" class="ui-panel hidden">
+        <h4>Track Preview</h4>
+        <p>Length: <span id="info-length">0</span> m</p>
+        <p>Radius: <span id="info-radius">Straight</span></p>
+        <p>Max Speed: <span id="info-speed">160</span> km/h</p>
+        <p>Layer: <span id="info-layer">0</span></p>
+    </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    
-    <script src="geometry.js"></script>
-    <script src="tracks.js"></script>
-    <script src="main.js"></script>
+    <script src="math.js"></script>
+    <script src="game.js"></script>
 </body>
 </html>
