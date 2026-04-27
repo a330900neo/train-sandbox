@@ -4,54 +4,32 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Railway Builder</title>
-    <script src="https://unpkg.com/maplibre-gl@3.3.1/dist/maplibre-gl.js"></script>
-    <link href="https://unpkg.com/maplibre-gl@3.3.1/dist/maplibre-gl.css" rel="stylesheet" />
-    <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div id="map"></div>
-
-    <div id="toolbar">
-        <button id="btn-pan" class="active">Pan & Zoom</button>
-        <button id="btn-build">Build Track</button>
-        <button id="btn-select">Select / Edit</button>
-        <div class="layer-control">
-            <label>Layer:</label>
-            <input type="number" id="current-layer" value="1" min="1" max="5">
+    <div id="ui-container">
+        <div class="panel">
+            <h3>Tools</h3>
+            <button id="btn-select" class="active">Select / Pan</button>
+            <button id="btn-build">Build Track</button>
+            <hr>
+            <label>Layer: <input type="number" id="input-layer" value="1" min="1" max="5" style="width: 40px;"></label>
+            <br>
+            <label>Parallel Snap (m): <input type="number" id="input-parallel" value="4.0" step="0.1" style="width: 50px;"></label>
+        </div>
+        
+        <div id="preview-info" class="panel hidden">
+            <h3>Preview Info</h3>
+            <p>Length: <span id="info-length">0</span> m</p>
+            <p>Radius: <span id="info-radius">Straight</span></p>
+            <p>Max Speed: <span id="info-speed">160</span> km/h</p>
+            <button id="btn-confirm">Confirm Track</button>
+            <button id="btn-flip">Flip Direction</button>
         </div>
     </div>
 
-    <div id="preview-info" class="hidden panel">
-        <h3>Track Preview</h3>
-        <p>Length: <span id="info-length">0</span> m</p>
-        <p>Radius: <span id="info-radius">Straight</span></p>
-        <p>Max Speed: <span id="info-speed">160</span> km/h</p>
-        <div class="arc-controls hidden" id="arc-controls">
-            <label>Arc 1 Radius: <input type="number" id="arc1-radius" value="500"></label>
-            <label>Arc 2 Radius: <input type="number" id="arc2-radius" value="500"></label>
-            <button id="btn-flip-dir">Flip Direction</button>
-        </div>
-        <button id="btn-confirm-build" class="primary">Confirm Build</button>
-    </div>
+    <canvas id="gameCanvas"></canvas>
 
-    <div id="properties-panel" class="hidden panel">
-        <h3>Track Properties</h3>
-        <label>Speed Limit (km/h): <input type="number" id="prop-speed" value="160" max="160"></label>
-        <label><input type="checkbox" id="prop-turnback"> Turnback Track</label>
-        <label><input type="checkbox" id="prop-oneway"> One Way</label>
-        <button id="btn-switch-dir">Switch Direction</button>
-        <hr>
-        <h4>Platforms</h4>
-        <select id="prop-platform-side">
-            <option value="none">None</option>
-            <option value="left">Left Only</option>
-            <option value="right">Right Only</option>
-            <option value="both">Both</option>
-        </select>
-        <label>Width (m): <input type="number" id="prop-platform-width" value="3" step="0.5"></label>
-    </div>
-
-    <script type="module" src="app.js"></script>
+    <script type="module" src="js/main.js"></script>
 </body>
 </html>
