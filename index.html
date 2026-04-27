@@ -2,56 +2,64 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Railway Builder Pro</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Real-World Railway Builder</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <link rel="stylesheet" href="style.css" />
+    
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
 </head>
 <body>
-
     <div id="map"></div>
 
-    <div id="toolbar">
+    <div id="toolbar" class="ui-panel">
         <button id="btn-build" class="active">Build Track</button>
-        <button id="btn-select">Select Tool</button>
-        <div class="control-group">
-            <label>Layer:</label>
-            <input type="number" id="layer-input" value="1" min="1" max="5">
-        </div>
-        <div class="control-group">
-            <label>Snap Offset (m):</label>
-            <input type="number" id="snap-offset" value="3.5" step="0.1">
-        </div>
+        <button id="btn-select">Select / Edit</button>
+        
+        <div class="separator"></div>
+        
+        <label>Layer:</label>
+        <select id="layer-select">
+            <option value="0">Layer 0 (Ground)</option>
+            <option value="1">Layer 1 (Elevated)</option>
+            <option value="2">Layer 2 (High)</option>
+        </select>
     </div>
 
-    <div id="preview-panel" class="hidden">
+    <div id="preview-panel" class="ui-panel hidden">
         <h3>Track Preview</h3>
         <p>Length: <span id="info-length">0</span> m</p>
         <p>Radius: <span id="info-radius">Straight</span></p>
         <p>Max Speed: <span id="info-speed">160</span> km/h</p>
-        <button id="btn-confirm" class="action-btn">Confirm Track</button>
-        <button id="btn-cancel" class="action-btn cancel">Cancel</button>
+        
+        <div class="controls">
+            <label>Arc Radius (m): <input type="number" id="input-radius" value="500"></label>
+            <label>Parallel Snap (m): <input type="number" id="input-parallel" value="3.5" step="0.1"></label>
+            <button id="btn-flip">Flip Direction</button>
+            <button id="btn-confirm-build" class="primary">Confirm Build</button>
+            <button id="btn-cancel-build">Cancel</button>
+        </div>
     </div>
 
-    <div id="properties-panel" class="hidden">
-        <h3>Track Properties</h3>
-        <label>Speed Limit (km/h): <input type="number" id="prop-speed"></label>
-        <label><input type="checkbox" id="prop-oneway"> One Way</label>
-        <label><input type="checkbox" id="prop-turnback"> Turnback Track</label>
-        <label>Platform: 
-            <select id="prop-platform">
-                <option value="none">None</option>
-                <option value="both">Both Sides</option>
-                <option value="left">Left Only</option>
-                <option value="right">Right Only</option>
-            </select>
-        </label>
-        <label>Platform Width (m): <input type="number" id="prop-plat-width" value="3"></label>
+    <div id="edit-panel" class="ui-panel hidden">
+        <h3>Edit Track</h3>
+        <label>Speed Limit (km/h): <input type="number" id="edit-speed"></label>
+        <label><input type="checkbox" id="edit-turnback"> Turnback Track</label>
+        <label><input type="checkbox" id="edit-oneway"> One-Way</label>
+        
+        <h4>Platform Settings</h4>
+        <select id="edit-platform">
+            <option value="none">None</option>
+            <option value="both">Both Sides</option>
+            <option value="left">Left Only</option>
+            <option value="right">Right Only</option>
+        </select>
+        <label>Width (m): <input type="number" id="edit-platform-width" value="3.0"></label>
     </div>
 
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://unpkg.com/turf@3.0.14/turf.min.js"></script>
-    <script src="app.js"></script>
+    <script src="math_utils.js"></script>
+    <script src="game.js"></script>
 </body>
 </html>
