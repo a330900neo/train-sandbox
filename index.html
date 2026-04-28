@@ -4,32 +4,70 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Railway Builder</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-    <div id="ui-container">
-        <div class="panel">
-            <h3>Tools</h3>
-            <button id="btn-select" class="active">Select / Pan</button>
-            <button id="btn-build">Build Track</button>
-            <hr>
-            <label>Layer: <input type="number" id="input-layer" value="1" min="1" max="5" style="width: 40px;"></label>
-            <br>
-            <label>Parallel Snap (m): <input type="number" id="input-parallel" value="4.0" step="0.1" style="width: 50px;"></label>
-        </div>
-        
-        <div id="preview-info" class="panel hidden">
-            <h3>Preview Info</h3>
-            <p>Length: <span id="info-length">0</span> m</p>
-            <p>Radius: <span id="info-radius">Straight</span></p>
-            <p>Max Speed: <span id="info-speed">160</span> km/h</p>
-            <button id="btn-confirm">Confirm Track</button>
-            <button id="btn-flip">Flip Direction</button>
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- Top Toolbar -->
+    <div id="toolbar" class="panel">
+        <button id="btn-build" class="active">Build Track</button>
+        <button id="btn-select">Select Tool</button>
+        <div class="separator"></div>
+        <label>
+            Layer: <select id="current-layer">
+                <option value="1">Layer 1</option>
+                <option value="2">Layer 2</option>
+                <option value="3">Layer 3</option>
+            </select>
+        </label>
+        <label>Parallel Snap: <input type="number" id="parallel-offset" value="3.5" step="0.1" style="width: 50px;">m</label>
+    </div>
+
+    <!-- Preview Information Panel -->
+    <div id="preview-info" class="panel hidden">
+        <h3>Track Preview</h3>
+        <p>Length: <span id="info-length">0</span> m</p>
+        <p>Radius: <span id="info-radius">0</span> m</p>
+        <p>Max Speed: <span id="info-speed">0</span> km/h</p>
+        <div class="actions">
+            <button id="btn-confirm" class="success">Confirm (Enter)</button>
+            <button id="btn-cancel" class="danger">Cancel (Esc)</button>
         </div>
     </div>
 
-    <canvas id="gameCanvas"></canvas>
+    <!-- Dubins Path Settings (Only shows when connecting two nodes) -->
+    <div id="dubins-menu" class="panel hidden">
+        <h3>Dubins Path Settings</h3>
+        <label>Radius 1 (m): <input type="range" id="dubins-r1" min="50" max="2000" value="300"></label>
+        <button id="btn-flip1">Flip Start Direction</button>
+        <hr>
+        <label>Radius 2 (m): <input type="range" id="dubins-r2" min="50" max="2000" value="300"></label>
+        <button id="btn-flip2">Flip End Direction</button>
+    </div>
 
-    <script type="module" src="js/main.js"></script>
+    <!-- Selection Settings -->
+    <div id="selection-menu" class="panel hidden">
+        <h3>Track Properties</h3>
+        <label>Speed Limit (km/h): <input type="number" id="sel-speed" value="160"></label>
+        <label><input type="checkbox" id="sel-turnback"> Turnback Track</label>
+        <label><input type="checkbox" id="sel-oneway"> One-way</label>
+        <button id="btn-rev-dir">Reverse Direction</button>
+        <hr>
+        <label>
+            Platform:
+            <select id="sel-platform">
+                <option value="none">None</option>
+                <option value="left">Left</option>
+                <option value="right">Right</option>
+                <option value="both">Both</option>
+            </select>
+        </label>
+        <label>Platform Width (m): <input type="number" id="sel-plat-width" value="3" step="0.5"></label>
+        <button id="btn-apply-sel" class="success">Apply Changes</button>
+        <button id="btn-delete-sel" class="danger">Delete Selected</button>
+    </div>
+
+    <script src="js/main.js"></script>
 </body>
 </html>

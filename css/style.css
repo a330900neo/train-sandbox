@@ -1,0 +1,131 @@
+body, html {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background-color: #7ba05b; /* Grass green */
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    touch-action: none; /* Prevent browser zooming/panning on mobile */
+}
+
+canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+.panel {
+    position: absolute;
+    background: rgba(255, 255, 255, 0.95);
+    padding: 12px;
+    border-radius: 8px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+    pointer-events: auto;
+    font-size: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.hidden {
+    display: none !important;
+}
+
+#toolbar {
+    top: 10px;
+    left: 10px;
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+#preview-info {
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 250px;
+}
+
+#dubins-menu {
+    top: 60px;
+    right: 10px;
+    width: 220px;
+}
+
+#selection-menu {
+    top: 60px;
+    left: 10px;
+    width: 220px;
+}
+
+h3 {
+    margin: 0 0 5px 0;
+    font-size: 16px;
+    border-bottom: 1px solid #ccc;
+    padding-bottom: 5px;
+}
+
+p {
+    margin: 4px 0;
+}
+
+button {
+    padding: 6px 12px;
+    border: none;
+    border-radius: 4px;
+    background: #e0e0e0;
+    cursor: pointer;
+    font-weight: bold;
+    transition: background 0.2s;
+}
+
+    button:hover {
+        background: #d0d0d0;
+    }
+
+    button.active {
+        background: #4CAF50;
+        color: white;
+    }
+
+    button.success {
+        background: #4CAF50;
+        color: white;
+    }
+
+        button.success:hover {
+            background: #45a049;
+        }
+
+    button.danger {
+        background: #f44336;
+        color: white;
+    }
+
+        button.danger:hover {
+            background: #da190b;
+        }
+
+.separator {
+    width: 1px;
+    height: 24px;
+    background: #ccc;
+    margin: 0 8px;
+}
+
+label {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+}
+
+input[type="number"], select {
+    width: 80px;
+    padding: 4px;
+}
+
+input[type="range"] {
+    width: 100px;
+}
