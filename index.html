@@ -9,64 +9,69 @@
 <body>
     <canvas id="gameCanvas"></canvas>
 
-    <!-- Top Toolbar -->
-    <div id="toolbar" class="panel">
+    <div id="ui-top">
+        <button id="btn-pan">Pan / Zoom</button>
         <button id="btn-build" class="active">Build Track</button>
-        <button id="btn-select">Select Tool</button>
-        <div class="separator"></div>
-        <label>
-            Layer: <select id="current-layer">
-                <option value="1">Layer 1</option>
-                <option value="2">Layer 2</option>
-                <option value="3">Layer 3</option>
-            </select>
-        </label>
-        <label>Parallel Snap: <input type="number" id="parallel-offset" value="3.5" step="0.1" style="width: 50px;">m</label>
-    </div>
+        <button id="btn-select">Select</button>
+        <button id="btn-insert">Insert Node</button>
+        <label><input type="checkbox" id="chk-snap" checked> Snap</label>
+        <div class="divider"></div>
+        <button id="btn-save" class="success">Save</button>
+        <button id="btn-load" class="success">Load</button>
+        <button id="btn-export" class="success">Export</button>
+        <button id="btn-import" class="success">Import</button>
+        <input type="file" id="file-import" accept=".json" style="display: none;">
 
-    <!-- Preview Information Panel -->
-    <div id="preview-info" class="panel hidden">
-        <h3>Track Preview</h3>
-        <p>Length: <span id="info-length">0</span> m</p>
-        <p>Radius: <span id="info-radius">0</span> m</p>
-        <p>Max Speed: <span id="info-speed">0</span> km/h</p>
-        <div class="actions">
-            <button id="btn-confirm" class="success">Confirm (Enter)</button>
-            <button id="btn-cancel" class="danger">Cancel (Esc)</button>
+        <div class="control-group">
+            <label>Offset: <span id="val-offset">3.5</span>m</label>
+            <input type="range" id="slider-offset" min="3.5" max="4.0" step="0.1" value="3.5">
+        </div>
+
+        <div class="control-group">
+            <label>Elev 1: <span id="val-e1">0</span>m</label>
+            <input type="range" id="slider-e1" min="-100" max="100" step="1" value="0">
+        </div>
+        <div class="control-group">
+            <label>Elev 2: <span id="val-e2">0</span>m</label>
+            <input type="range" id="slider-e2" min="-100" max="100" step="1" value="0">
         </div>
     </div>
 
-    <!-- Dubins Path Settings (Only shows when connecting two nodes) -->
-    <div id="dubins-menu" class="panel hidden">
-        <h3>Dubins Path Settings</h3>
-        <label>Radius 1 (m): <input type="range" id="dubins-r1" min="50" max="2000" value="300"></label>
-        <button id="btn-flip1">Flip Start Direction</button>
-        <hr>
-        <label>Radius 2 (m): <input type="range" id="dubins-r2" min="50" max="2000" value="300"></label>
-        <button id="btn-flip2">Flip End Direction</button>
+    <div id="ui-info" class="hidden">
+        <div>Length: <span id="info-len">0</span>m</div>
+        <div>Radius: <span id="info-rad">0</span>m</div>
+        <div>Max Speed: <span id="info-spd">0</span> km/h</div>
     </div>
 
-    <!-- Selection Settings -->
-    <div id="selection-menu" class="panel hidden">
-        <h3>Track Properties</h3>
-        <label>Speed Limit (km/h): <input type="number" id="sel-speed" value="160"></label>
-        <label><input type="checkbox" id="sel-turnback"> Turnback Track</label>
-        <label><input type="checkbox" id="sel-oneway"> One-way</label>
-        <button id="btn-rev-dir">Reverse Direction</button>
-        <hr>
-        <label>
-            Platform:
-            <select id="sel-platform">
-                <option value="none">None</option>
-                <option value="left">Left</option>
-                <option value="right">Right</option>
-                <option value="both">Both</option>
-            </select>
-        </label>
-        <label>Platform Width (m): <input type="number" id="sel-plat-width" value="3" step="0.5"></label>
-        <button id="btn-apply-sel" class="success">Apply Changes</button>
-        <button id="btn-delete-sel" class="danger">Delete Selected</button>
+    <div id="ui-dubins" class="hidden">
+        <div class="control-group">
+            <label>R1 (Start Radius):</label>
+            <div class="number-input">
+                <button id="btn-r1-down">-</button>
+                <input type="number" id="input-r1" min="5" step="1" value="500">
+                <button id="btn-r1-up">+</button>
+            </div>
+        </div>
+        <div class="control-group">
+            <label>R2 (End Radius):</label>
+            <div class="number-input">
+                <button id="btn-r2-down">-</button>
+                <input type="number" id="input-r2" min="5" step="1" value="500">
+                <button id="btn-r2-up">+</button>
+            </div>
+        </div>
     </div>
+
+    <div id="ui-actions" class="hidden">
+        <button id="btn-confirm" class="success">Confirm</button>
+        <button id="btn-cancel" class="danger">Cancel</button>
+    </div>
+
+    <div id="ui-selection" class="hidden">
+        <button id="btn-delete" class="danger">Delete Selected</button>
+    </div>
+
+    <div id="attribution">© OpenStreetMap contributors</div>
 
     <script src="js/main.js"></script>
 </body>

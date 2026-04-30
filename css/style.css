@@ -1,28 +1,70 @@
-body, html {
+* {
+    box-sizing: border-box;
     margin: 0;
     padding: 0;
-    width: 100%;
-    height: 100%;
+    user-select: none;
+}
+
+body {
     overflow: hidden;
-    background-color: #7ba05b; /* Grass green */
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    touch-action: none; /* Prevent browser zooming/panning on mobile */
+    background-color: #e0e0e0;
+    font-family: sans-serif;
+    touch-action: none;
 }
 
 canvas {
     display: block;
-    width: 100%;
-    height: 100%;
+    width: 100vw;
+    height: 100vh;
+    cursor: crosshair;
+    touch-action: none;
 }
 
-.panel {
+#ui-top, #ui-info, #ui-dubins, #ui-actions, #ui-selection {
     position: absolute;
     background: rgba(255, 255, 255, 0.95);
-    padding: 12px;
+    padding: 10px;
     border-radius: 8px;
-    box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     pointer-events: auto;
+}
+
+#ui-top {
+    top: 10px;
+    left: 10px;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    max-width: 95vw;
+}
+
+#ui-info {
+    top: 90px;
+    left: 10px;
     font-size: 14px;
+    line-height: 1.5;
+}
+
+#ui-dubins {
+    bottom: 70px;
+    left: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+#ui-actions {
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 10px;
+}
+
+#ui-selection {
+    top: 90px;
+    right: 10px;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -32,100 +74,96 @@ canvas {
     display: none !important;
 }
 
-#toolbar {
-    top: 10px;
-    left: 10px;
-    flex-direction: row;
-    align-items: center;
-    flex-wrap: wrap;
-}
-
-#preview-info {
-    bottom: 20px;
-    left: 50%;
-    transform: translateX(-50%);
-    min-width: 250px;
-}
-
-#dubins-menu {
-    top: 60px;
-    right: 10px;
-    width: 220px;
-}
-
-#selection-menu {
-    top: 60px;
-    left: 10px;
-    width: 220px;
-}
-
-h3 {
-    margin: 0 0 5px 0;
-    font-size: 16px;
-    border-bottom: 1px solid #ccc;
-    padding-bottom: 5px;
-}
-
-p {
-    margin: 4px 0;
-}
-
 button {
-    padding: 6px 12px;
+    padding: 8px 12px;
     border: none;
     border-radius: 4px;
-    background: #e0e0e0;
     cursor: pointer;
+    background: #007bff;
+    color: white;
     font-weight: bold;
-    transition: background 0.2s;
+    transition: 0.1s;
 }
 
-    button:hover {
-        background: #d0d0d0;
-    }
-
     button.active {
-        background: #4CAF50;
-        color: white;
+        background: #004494;
+        box-shadow: inset 0 3px 5px rgba(0,0,0,0.3);
+        transform: translateY(1px);
     }
 
     button.success {
-        background: #4CAF50;
-        color: white;
+        background: #28a745;
     }
-
-        button.success:hover {
-            background: #45a049;
-        }
 
     button.danger {
-        background: #f44336;
-        color: white;
+        background: #dc3545;
     }
 
-        button.danger:hover {
-            background: #da190b;
-        }
+    button:active {
+        filter: brightness(0.9);
+    }
 
-.separator {
+.divider {
     width: 1px;
     height: 24px;
     background: #ccc;
-    margin: 0 8px;
+    margin: 0 4px;
 }
+
+.control-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+input[type=range] {
+    vertical-align: middle;
+}
+
+    input[type=range]:disabled {
+        opacity: 0.5;
+    }
 
 label {
+    font-size: 12px;
+    font-weight: bold;
+}
+
+.number-input {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    font-size: 13px;
+    gap: 4px;
 }
 
-input[type="number"], select {
-    width: 80px;
-    padding: 4px;
-}
+    .number-input button {
+        padding: 4px 10px;
+        font-size: 16px;
+        background: #ddd;
+        color: #333;
+        border-radius: 4px;
+    }
 
-input[type="range"] {
-    width: 100px;
+        .number-input button:active {
+            background: #bbb;
+        }
+
+    .number-input input {
+        width: 70px;
+        text-align: center;
+        padding: 6px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 14px;
+        font-weight: bold;
+    }
+
+#attribution {
+    position: absolute;
+    bottom: 5px;
+    right: 5px;
+    font-size: 10px;
+    color: #555;
+    background: rgba(255,255,255,0.7);
+    padding: 2px 4px;
+    pointer-events: none;
 }
