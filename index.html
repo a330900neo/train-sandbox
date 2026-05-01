@@ -14,6 +14,9 @@
         <button id="btn-build" class="active">Build Track</button>
         <button id="btn-select">Select</button>
         <button id="btn-insert">Insert Node</button>
+        <button id="btn-plat-node">Place Plat Node</button>
+        <button id="btn-plat-build">Build Platform</button>
+
         <label><input type="checkbox" id="chk-snap" checked> Snap</label>
         <div class="divider"></div>
         <button id="btn-save" class="success">Save</button>
@@ -23,17 +26,30 @@
         <input type="file" id="file-import" accept=".json" style="display: none;">
 
         <div class="control-group">
+            <label>Max Elev: <span id="val-max-elev">100</span>m</label>
+            <input type="range" id="slider-max-elev" min="-100" max="100" step="1" value="100">
+        </div>
+
+        <div class="control-group">
             <label>Offset: <span id="val-offset">3.5</span>m</label>
             <input type="range" id="slider-offset" min="3.5" max="4.0" step="0.1" value="3.5">
         </div>
 
         <div class="control-group">
-            <label>Elev 1: <span id="val-e1">0</span>m</label>
-            <input type="range" id="slider-e1" min="-100" max="100" step="1" value="0">
+            <label>Elev 1 (Start):</label>
+            <div class="number-input">
+                <button id="btn-e1-down">-</button>
+                <input type="number" id="input-e1" min="-100" max="100" step="1" value="0">
+                <button id="btn-e1-up">+</button>
+            </div>
         </div>
         <div class="control-group">
-            <label>Elev 2: <span id="val-e2">0</span>m</label>
-            <input type="range" id="slider-e2" min="-100" max="100" step="1" value="0">
+            <label>Elev 2 (End):</label>
+            <div class="number-input">
+                <button id="btn-e2-down">-</button>
+                <input type="number" id="input-e2" min="-100" max="100" step="1" value="0">
+                <button id="btn-e2-up">+</button>
+            </div>
         </div>
     </div>
 
@@ -65,9 +81,43 @@
     <div id="ui-actions" class="hidden">
         <button id="btn-confirm" class="success">Confirm</button>
         <button id="btn-cancel" class="danger">Cancel</button>
+        <button id="btn-plat-undo" class="hidden">Undo Vertex</button>
     </div>
 
     <div id="ui-selection" class="hidden">
+        <div id="selection-length-info" class="hidden" style="margin-bottom: 5px; font-weight: bold; color: #004494;"></div>
+        <div id="selection-platform-tools" class="hidden">
+            <label style="display:block; margin-bottom: 2px;">Toggle Platform Edge:</label>
+            <div style="display: flex; gap: 4px; margin-bottom: 8px;">
+                <button id="btn-plat-left">Left</button>
+                <button id="btn-plat-right">Right</button>
+                <button id="btn-plat-both">Both</button>
+            </div>
+        </div>
+        <div id="selection-track-props" class="hidden">
+            <div class="control-group">
+                <label>Speed Limit (km/h):</label>
+                <div class="number-input">
+                    <input type="number" id="input-speed" placeholder="Auto" style="width: 60px;">
+                    <button id="btn-apply-speed" class="success">Set</button>
+                </div>
+            </div>
+            <button id="btn-oneway">One-Way: Off</button>
+            <div class="h-divider"></div>
+        </div>
+
+        <div id="selection-color-props" class="hidden">
+            <div class="control-group">
+                <label>Fill Color:</label>
+                <input type="color" id="input-plat-color" value="#cccccc">
+            </div>
+            <div class="control-group">
+                <label>Outline Color:</label>
+                <input type="color" id="input-plat-outline" value="#555555">
+            </div>
+            <div class="h-divider"></div>
+        </div>
+
         <button id="btn-delete" class="danger">Delete Selected</button>
     </div>
 

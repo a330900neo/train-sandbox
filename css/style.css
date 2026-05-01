@@ -40,7 +40,7 @@ canvas {
 }
 
 #ui-info {
-    top: 90px;
+    top: 125px;
     left: 10px;
     font-size: 14px;
     line-height: 1.5;
@@ -63,11 +63,12 @@ canvas {
 }
 
 #ui-selection {
-    top: 90px;
+    top: 125px;
     right: 10px;
     display: flex;
     flex-direction: column;
     gap: 8px;
+    max-width: 200px;
 }
 
 .hidden {
@@ -110,6 +111,13 @@ button {
     margin: 0 4px;
 }
 
+.h-divider {
+    width: 100%;
+    height: 1px;
+    background: #ccc;
+    margin: 4px 0;
+}
+
 .control-group {
     display: flex;
     flex-direction: column;
@@ -123,6 +131,13 @@ input[type=range] {
     input[type=range]:disabled {
         opacity: 0.5;
     }
+
+input[type=color] {
+    height: 30px;
+    border: none;
+    cursor: pointer;
+    border-radius: 4px;
+}
 
 label {
     font-size: 12px;
@@ -166,4 +181,59 @@ label {
     background: rgba(255,255,255,0.7);
     padding: 2px 4px;
     pointer-events: none;
+}
+
+/* COMPACT MOBILE UI */
+@media (max-width: 768px) {
+    #ui-top {
+        top: 5px;
+        left: 5px;
+        gap: 5px;
+        padding: 6px;
+    }
+
+    button {
+        padding: 5px 8px;
+        font-size: 11px;
+    }
+
+    .control-group {
+        flex-direction: row;
+        align-items: center;
+        gap: 5px;
+    }
+
+    label {
+        font-size: 10px;
+        white-space: nowrap;
+    }
+
+    .number-input input {
+        width: 50px;
+        padding: 4px;
+        font-size: 11px;
+    }
+
+    .number-input button {
+        padding: 2px 6px;
+    }
+
+    #ui-info {
+        top: 85px;
+        left: 5px;
+        font-size: 11px;
+        padding: 6px;
+    }
+
+    #ui-selection {
+        top: 85px;
+        right: 5px;
+        padding: 8px;
+    }
+
+    #ui-dubins {
+        bottom: 60px;
+        left: 5px;
+        padding: 6px;
+    }
 }
