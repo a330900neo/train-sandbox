@@ -16,11 +16,29 @@ canvas {
     display: block;
     width: 100vw;
     height: 100vh;
+    position: absolute;
+    top: 0;
+    left: 0;
     cursor: crosshair;
     touch-action: none;
 }
 
-#ui-top, #ui-info, #ui-dubins, #ui-actions, #ui-selection {
+#master-mode-switcher {
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(255,255,255,0.95);
+    padding: 5px;
+    border-radius: 8px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    display: flex;
+    gap: 5px;
+    pointer-events: auto;
+    z-index: 1000;
+}
+
+.panel, #ui-top, #ui-info, #ui-dubins, #ui-actions, #ui-selection, #ui-depot-preview {
     position: absolute;
     background: rgba(255, 255, 255, 0.95);
     padding: 10px;
@@ -30,7 +48,7 @@ canvas {
 }
 
 #ui-top {
-    top: 10px;
+    top: 60px;
     left: 10px;
     display: flex;
     gap: 10px;
@@ -40,10 +58,22 @@ canvas {
 }
 
 #ui-info {
-    top: 125px;
+    top: 175px;
     left: 10px;
     font-size: 14px;
     line-height: 1.5;
+}
+
+#ui-depot-preview {
+    top: 175px;
+    left: 10px;
+    font-size: 14px;
+    line-height: 1.5;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 70vh;
+    overflow-y: auto;
 }
 
 #ui-dubins {
@@ -63,12 +93,14 @@ canvas {
 }
 
 #ui-selection {
-    top: 125px;
+    top: 175px;
     right: 10px;
     display: flex;
     flex-direction: column;
     gap: 8px;
-    max-width: 200px;
+    max-width: 220px;
+    max-height: 70vh;
+    overflow-y: auto;
 }
 
 .hidden {
@@ -162,7 +194,7 @@ label {
             background: #bbb;
         }
 
-    .number-input input {
+    .number-input input, #selection-depot-props input[type="text"], #selection-depot-props input[type="number"] {
         width: 70px;
         text-align: center;
         padding: 6px;
@@ -170,6 +202,28 @@ label {
         border-radius: 4px;
         font-size: 14px;
         font-weight: bold;
+    }
+
+#line-stations li {
+    display: flex;
+    gap: 5px;
+    align-items: center;
+    padding: 4px;
+    border-bottom: 1px solid #eee;
+}
+
+    #line-stations li input {
+        width: 40px;
+        font-size: 11px;
+        padding: 2px;
+        text-align: center;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+    }
+
+    #line-stations li button {
+        padding: 2px 5px;
+        font-size: 10px;
     }
 
 #attribution {
@@ -185,8 +239,19 @@ label {
 
 /* COMPACT MOBILE UI */
 @media (max-width: 768px) {
-    #ui-top {
+    #master-mode-switcher {
         top: 5px;
+        padding: 3px;
+        font-size: 11px;
+    }
+
+        #master-mode-switcher button {
+            padding: 4px 6px;
+            font-size: 11px;
+        }
+
+    #ui-top {
+        top: 40px;
         left: 5px;
         gap: 5px;
         padding: 6px;
@@ -208,7 +273,7 @@ label {
         white-space: nowrap;
     }
 
-    .number-input input {
+    .number-input input, #selection-depot-props input[type="text"], #selection-depot-props input[type="number"] {
         width: 50px;
         padding: 4px;
         font-size: 11px;
@@ -218,22 +283,28 @@ label {
         padding: 2px 6px;
     }
 
-    #ui-info {
-        top: 85px;
+    #ui-info, #ui-depot-preview {
+        top: 125px;
         left: 5px;
         font-size: 11px;
         padding: 6px;
     }
 
     #ui-selection {
-        top: 85px;
+        top: 125px;
         right: 5px;
         padding: 8px;
+        max-width: 180px;
     }
 
     #ui-dubins {
         bottom: 60px;
         left: 5px;
         padding: 6px;
+    }
+
+    .panel {
+        top: 40px !important;
+        left: 5px !important;
     }
 }

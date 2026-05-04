@@ -9,120 +9,225 @@
 <body>
     <canvas id="gameCanvas"></canvas>
 
-    <div id="ui-top">
-        <button id="btn-pan">Pan / Zoom</button>
-        <button id="btn-build" class="active">Build Track</button>
-        <button id="btn-select">Select</button>
-        <button id="btn-insert">Insert Node</button>
-        <button id="btn-plat-node">Place Plat Node</button>
-        <button id="btn-plat-build">Build Platform</button>
-
-        <label><input type="checkbox" id="chk-snap" checked> Snap</label>
-        <div class="divider"></div>
-        <button id="btn-save" class="success">Save</button>
-        <button id="btn-load" class="success">Load</button>
-        <button id="btn-export" class="success">Export</button>
-        <button id="btn-import" class="success">Import</button>
-        <input type="file" id="file-import" accept=".json" style="display: none;">
-
-        <div class="control-group">
-            <label>Max Elev: <span id="val-max-elev">100</span>m</label>
-            <input type="range" id="slider-max-elev" min="-100" max="100" step="1" value="100">
-        </div>
-
-        <div class="control-group">
-            <label>Offset: <span id="val-offset">3.5</span>m</label>
-            <input type="range" id="slider-offset" min="3.5" max="4.0" step="0.1" value="3.5">
-        </div>
-
-        <div class="control-group">
-            <label>Elev 1 (Start):</label>
-            <div class="number-input">
-                <button id="btn-e1-down">-</button>
-                <input type="number" id="input-e1" min="-100" max="100" step="1" value="0">
-                <button id="btn-e1-up">+</button>
-            </div>
-        </div>
-        <div class="control-group">
-            <label>Elev 2 (End):</label>
-            <div class="number-input">
-                <button id="btn-e2-down">-</button>
-                <input type="number" id="input-e2" min="-100" max="100" step="1" value="0">
-                <button id="btn-e2-up">+</button>
-            </div>
-        </div>
+    <div id="master-mode-switcher">
+        <button id="master-build" class="active">Building Toolbar</button>
+        <button id="master-sim">Trains & Sim Toolbar</button>
     </div>
 
-    <div id="ui-info" class="hidden">
-        <div>Length: <span id="info-len">0</span>m</div>
-        <div>Radius: <span id="info-rad">0</span>m</div>
-        <div>Max Speed: <span id="info-spd">0</span> km/h</div>
-    </div>
+    <div id="toolbar-build">
+        <div id="ui-top">
+            <button id="btn-pan">Pan / Zoom</button>
+            <button id="btn-build" class="active">Build Track</button>
+            <button id="btn-build-depot">Build Depot</button>
+            <button id="btn-select">Select</button>
+            <button id="btn-insert">Insert Node</button>
+            <button id="btn-plat-node">Place Plat Node</button>
+            <button id="btn-plat-build">Build Platform</button>
 
-    <div id="ui-dubins" class="hidden">
-        <div class="control-group">
-            <label>R1 (Start Radius):</label>
-            <div class="number-input">
-                <button id="btn-r1-down">-</button>
-                <input type="number" id="input-r1" min="5" step="1" value="500">
-                <button id="btn-r1-up">+</button>
-            </div>
-        </div>
-        <div class="control-group">
-            <label>R2 (End Radius):</label>
-            <div class="number-input">
-                <button id="btn-r2-down">-</button>
-                <input type="number" id="input-r2" min="5" step="1" value="500">
-                <button id="btn-r2-up">+</button>
-            </div>
-        </div>
-    </div>
+            <label><input type="checkbox" id="chk-snap" checked> Snap</label>
+            <div class="divider"></div>
+            <button id="btn-save" class="success">Save</button>
+            <button id="btn-load" class="success">Load</button>
+            <button id="btn-export" class="success">Export</button>
+            <button id="btn-import" class="success">Import</button>
+            <input type="file" id="file-import" accept=".json" style="display: none;">
 
-    <div id="ui-actions" class="hidden">
-        <button id="btn-confirm" class="success">Confirm</button>
-        <button id="btn-cancel" class="danger">Cancel</button>
-        <button id="btn-plat-undo" class="hidden">Undo Vertex</button>
-    </div>
-
-    <div id="ui-selection" class="hidden">
-        <div id="selection-length-info" class="hidden" style="margin-bottom: 5px; font-weight: bold; color: #004494;"></div>
-        <div id="selection-platform-tools" class="hidden">
-            <label style="display:block; margin-bottom: 2px;">Toggle Platform Edge:</label>
-            <div style="display: flex; gap: 4px; margin-bottom: 8px;">
-                <button id="btn-plat-left">Left</button>
-                <button id="btn-plat-right">Right</button>
-                <button id="btn-plat-both">Both</button>
-            </div>
-        </div>
-        <div id="selection-track-props" class="hidden">
             <div class="control-group">
-                <label>Speed Limit (km/h):</label>
+                <label>Max Elev: <span id="val-max-elev">100</span>m</label>
+                <input type="range" id="slider-max-elev" min="-100" max="100" step="1" value="100">
+            </div>
+
+            <div class="control-group">
+                <label>Offset: <span id="val-offset">3.5</span>m</label>
+                <input type="range" id="slider-offset" min="3.5" max="7.0" step="0.1" value="3.5">
+            </div>
+
+            <div class="control-group">
+                <label>Elev 1 (Start):</label>
                 <div class="number-input">
-                    <input type="number" id="input-speed" placeholder="Auto" style="width: 60px;">
-                    <button id="btn-apply-speed" class="success">Set</button>
+                    <button id="btn-e1-down">-</button>
+                    <input type="number" id="input-e1" min="-100" max="100" step="1" value="0">
+                    <button id="btn-e1-up">+</button>
                 </div>
             </div>
-            <button id="btn-oneway">One-Way: Off</button>
-            <div class="h-divider"></div>
+            <div class="control-group">
+                <label>Elev 2 (End):</label>
+                <div class="number-input">
+                    <button id="btn-e2-down">-</button>
+                    <input type="number" id="input-e2" min="-100" max="100" step="1" value="0">
+                    <button id="btn-e2-up">+</button>
+                </div>
+            </div>
         </div>
 
-        <div id="selection-color-props" class="hidden">
-            <div class="control-group">
-                <label>Fill Color:</label>
-                <input type="color" id="input-plat-color" value="#cccccc">
-            </div>
-            <div class="control-group">
-                <label>Outline Color:</label>
-                <input type="color" id="input-plat-outline" value="#555555">
-            </div>
-            <div class="h-divider"></div>
+        <div id="ui-info" class="hidden">
+            <div>Length: <span id="info-len">0</span>m</div>
+            <div>Radius: <span id="info-rad">0</span>m</div>
+            <div>Max Speed: <span id="info-spd">0</span> km/h</div>
         </div>
 
-        <button id="btn-delete" class="danger">Delete Selected</button>
+        <div id="ui-dubins" class="hidden">
+            <div class="control-group">
+                <label>R1 (Start Radius):</label>
+                <div class="number-input">
+                    <button id="btn-r1-down">-</button>
+                    <input type="number" id="input-r1" min="5" step="1" value="500">
+                    <button id="btn-r1-up">+</button>
+                </div>
+            </div>
+            <div class="control-group">
+                <label>R2 (End Radius):</label>
+                <div class="number-input">
+                    <button id="btn-r2-down">-</button>
+                    <input type="number" id="input-r2" min="5" step="1" value="500">
+                    <button id="btn-r2-up">+</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="ui-depot-preview" class="panel hidden">
+            <div class="control-group">
+                <label>Length: <span id="depot-val-len">100</span>m</label>
+                <input type="range" id="depot-slider-len" min="20" max="400" step="5" value="100">
+            </div>
+            <div class="control-group">
+                <label>Width: <span id="depot-val-wid">15</span>m</label>
+                <input type="range" id="depot-slider-wid" min="10" max="50" step="1" value="15">
+            </div>
+            <div class="control-group">
+                <label>Angle: <span id="depot-val-ang">0</span>°</label>
+                <input type="range" id="depot-slider-ang" min="0" max="359" step="1" value="0">
+            </div>
+            <div class="control-group">
+                <label>Elevation (m):</label>
+                <input type="number" id="depot-input-elev" style="width:60px; text-align:center;" value="0">
+            </div>
+        </div>
+
+        <div id="ui-actions" class="hidden">
+            <button id="btn-confirm" class="success">Confirm</button>
+            <button id="btn-cancel" class="danger">Cancel</button>
+            <button id="btn-plat-undo" class="hidden">Undo Vertex</button>
+        </div>
+
+        <div id="ui-selection" class="hidden">
+            <div id="selection-length-info" class="hidden" style="margin-bottom: 5px; font-weight: bold; color: #004494;"></div>
+
+            <div id="selection-platform-tools" class="hidden">
+                <label style="display:block; margin-bottom: 2px;">Toggle Platform Edge:</label>
+                <div style="display: flex; gap: 4px; margin-bottom: 8px;">
+                    <button id="btn-plat-left">Left</button>
+                    <button id="btn-plat-right">Right</button>
+                    <button id="btn-plat-both">Both</button>
+                </div>
+            </div>
+
+            <div id="selection-track-props" class="hidden">
+                <div class="control-group">
+                    <label>Speed Limit (km/h):</label>
+                    <div class="number-input">
+                        <input type="number" id="input-speed" placeholder="Auto" style="width: 60px;">
+                        <button id="btn-apply-speed" class="success">Set</button>
+                    </div>
+                </div>
+                <button id="btn-oneway">One-Way: Off</button>
+                <div class="h-divider"></div>
+            </div>
+
+            <div id="selection-color-props" class="hidden">
+                <div class="control-group">
+                    <label>Fill Color:</label>
+                    <input type="color" id="input-plat-color" value="#cccccc">
+                </div>
+                <div class="control-group">
+                    <label>Outline Color:</label>
+                    <input type="color" id="input-plat-outline" value="#555555">
+                </div>
+                <div class="h-divider"></div>
+            </div>
+
+            <div id="selection-depot-props" class="hidden">
+                <label style="display:block; font-weight:bold; margin-bottom:4px; color:#004494;">Depot Config</label>
+                <div class="control-group"><label>Fleet Size:</label><input type="text" id="prop-depot-trains" style="width:70px;" value="inf"></div>
+                <div class="control-group"><label>Carriages:</label><input type="number" id="prop-depot-carriages" min="1" max="20" value="4" style="width:70px;"></div>
+                <div style="font-size: 10px; color: #555; margin-bottom: 4px;">Train Length: <span id="prop-depot-len-disp">103</span>m</div>
+                <div class="control-group"><label>Serve Lines:</label><input type="text" id="prop-depot-line" style="width:70px;" placeholder="L1, L2..."></div>
+                <div class="control-group"><label>Max Speed (kmh):</label><input type="number" id="prop-depot-speed" max="160" style="width:70px;"></div>
+                <div class="control-group"><label>Accel (m/s²):</label><input type="number" id="prop-depot-accel" step="0.1" style="width:70px;"></div>
+                <div class="control-group"><label>Braking (m/s²):</label><input type="number" id="prop-depot-brake" step="0.1" style="width:70px;"></div>
+                <div class="control-group"><label>E-Brake (m/s²):</label><input type="number" id="prop-depot-ebrake" step="0.1" style="width:70px;"></div>
+                <div class="control-group"><label>Train Color:</label><input type="color" id="prop-depot-color"></div>
+                <div class="h-divider"></div>
+            </div>
+
+            <button id="btn-delete" class="danger">Delete Selected</button>
+        </div>
+    </div>
+
+    <div id="toolbar-sim" class="hidden">
+        <div id="ui-top-sim" class="panel" style="top: 60px; left: 10px;">
+            <div style="display:flex; gap:15px; align-items:center; flex-wrap: wrap;">
+                <div id="sim-clock" style="font-size:22px; font-weight:bold; font-family:monospace; color:#004494;">08:00:00</div>
+                <div class="control-group">
+                    <label>Time Speed: <span id="val-sim-speed">1</span>x</label>
+                    <input type="range" id="slider-sim-speed" min="1" max="300" step="1" value="1">
+                </div>
+                <button id="btn-manage-lines">Manage Lines</button>
+            </div>
+        </div>
+
+        <div id="ui-train-info" class="panel hidden" style="top: 130px; left: 10px; width: 220px; border-left: 4px solid #ff8800;">
+            <div style="font-weight:bold; margin-bottom:5px; color:#004494;" id="train-info-title">Train 001</div>
+            <div style="font-size:12px; margin-bottom:4px;">Line: <span id="train-info-line" style="font-weight:bold;">L1</span></div>
+            <div style="font-size:12px; margin-bottom:4px;">State: <span id="train-info-state">DRIVING</span></div>
+            <div style="font-size:12px; margin-bottom:4px;">Speed: <span id="train-info-speed">0</span> km/h</div>
+            <div style="font-size:12px; margin-bottom:4px;">Next Stop: <span id="train-info-next">Station A</span></div>
+            <div class="h-divider"></div>
+            <button id="btn-train-despawn" class="danger" style="width:100%; margin-top:5px;">Force Despawn</button>
+        </div>
+
+        <div id="ui-lines" class="panel hidden" style="top: 130px; left: 10px; width: 320px; max-height: 70vh; overflow-y: auto;">
+            <div style="font-weight:bold; margin-bottom:5px; color:#004494;">Line Manager</div>
+            <select id="line-selector" style="width:100%; margin-bottom:5px; padding:4px;"><option value="new">+ Create New Line</option></select>
+
+            <div class="control-group">
+                <input type="text" id="line-name" placeholder="Line Name" style="width:100%;">
+                <input type="color" id="line-color" value="#ff0000" style="width:100%;">
+            </div>
+
+            <div class="control-group" style="margin-top:5px;">
+                <label>Schedule Buffer (Delay Margin): <span id="val-line-buffer">5</span>%</label>
+                <input type="range" id="line-buffer" min="3" max="9" step="1" value="5">
+            </div>
+
+            <div style="display:flex; gap:5px; margin: 10px 0;">
+                <button id="btn-line-inbound" class="active" style="flex:1;">Inbound</button>
+                <button id="btn-line-outbound" style="flex:1;">Outbound</button>
+            </div>
+
+            <div style="font-size:11px; color:#666; margin-bottom:2px;">Click platform tracks on the map to add to sequence.</div>
+            <ul id="line-stations" style="list-style:none; padding:0; margin:0 0 10px 0; border:1px solid #ccc; min-height:50px; max-height:150px; overflow-y:auto; font-size:12px;"></ul>
+
+            <div class="control-group" style="margin-top:10px;">
+                <label>Schedule Entry:</label>
+                <div style="font-size:10px; color:#555; margin-bottom:3px;">Fleet: <b>HH:MM:SS N</b> (e.g. 08:00:00 3 = run 3 trains from 8am)<br>Departure: <b>HH:MM:SS[+Int*Cnt]</b> (e.g. 08:00:00+00:05:00*12)</div>
+                <div style="display:flex; gap:4px;">
+                    <input type="text" id="line-schedule-input" placeholder="08:32:53 2  or  08:00:00+00:05:00*12" style="flex:1; padding:4px;">
+                    <button id="btn-line-add-time" class="success" style="padding: 4px 8px;">+</button>
+                </div>
+            </div>
+            <ul id="line-schedule-list" style="list-style:none; padding:0; margin:5px 0; border:1px solid #ccc; max-height:100px; overflow-y:auto; font-size:12px;"></ul>
+
+            <div style="display:flex; gap:5px; margin-top:10px;">
+                <button id="btn-line-save" class="success" style="flex:1;">Simulate & Save Line</button>
+                <button id="btn-line-delete" class="danger" style="flex:1;">Delete</button>
+            </div>
+        </div>
     </div>
 
     <div id="attribution">© OpenStreetMap contributors</div>
 
+    <script src="js/sim.js"></script>
     <script src="js/main.js"></script>
 </body>
 </html>
