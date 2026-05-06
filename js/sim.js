@@ -1,4 +1,4 @@
-﻿// --- SIMULATION & DATA MODELS ---
+// --- SIMULATION & DATA MODELS ---
 window.depots = [];
 window.selectedDepot = null;
 window.trains = [];
@@ -348,13 +348,12 @@ window.findNextTrack = function (graph, startNodeId, targetTrackIds, incomingTra
     // outDir = direction departing along the candidate next track.
     // A true U-turn means outDir ≈ inDir (diff ≈ 0) — going back the exact way we came.
     // Going straight means outDir ≈ inDir + π (diff ≈ π) — which is FINE.
-    // Block when diff < π/4 (within 45° of reversing) — tight enough to catch true
-    // reversals but loose enough not to block tight-junction platform exits.
+    // So block when diff < π/6 (within 30° of reversing).
     function isUTurn(incomingId, candidateId, nodeId) {
         let inDir = window._getEdgeDir(incomingId, nodeId);
         let outDir = window._getEdgeDir(candidateId, nodeId);
         if (inDir === null || outDir === null) return false;
-        return Math.abs(normalizeAngle(outDir - inDir)) < (Math.PI / 4);
+        return Math.abs(normalizeAngle(outDir - inDir)) < (Math.PI / 2);
     }
 
     // Check if we are already adjacent to the target
@@ -543,8 +542,6 @@ window.spawnTrainOnLine = function (line, dir, depot) {
         speed: 0, state: 'DRIVING',
         nextStationIdx: 0, dwellTimer: 0,
         returningToDepot: false,
-        lastTrackId: null,
-        lastExitNode: null,
         history: [{
             track: depTrack, fromNode: fromNode, toNode: toNode,
             startDist: 0, endDist: depTrack.length
@@ -777,36 +774,23 @@ window.updateSim = function (dt) {
                     // Also stop if we've gone far enough with partial platform captured (avoid infinite loop on broken maps)
                     if (allPlatInHistory && lookaheadEnd >= tr.headDist + tr.trainLength * 2) break;
 
-                    // Always use the last segment's track as the incoming block for U-turn detection.
-                    // If lastTrackId is still set (just after dwell/turnaround), use it instead so
-                    // we never route backward into the segment we just stopped on.
-                    let incomingForLookahead = tr.lastTrackId || last.track.id;
-
-                    // If we have a forced exit node (set after dwell), use that node as the
-                    // look-ahead origin so the extension always goes forward.
-                    let lookFromNode = (tr.lastExitNode != null) ? tr.lastExitNode : last.toNode;
-
-                    // Safety: if lookFromNode doesn't match last.toNode the history is already
-                    // ahead of the forced node – clear it.
-                    if (tr.lastExitNode != null && last.toNode !== tr.lastExitNode) {
-                        tr.lastExitNode = null;
-                        lookFromNode = last.toNode;
+                    // Use lastTrackId on the very first extension after a turnaround so we
+                    // don't U-turn back into the platform we just left.
+                    let incomingForLookahead = last.track.id;
+                    if (tr.lastTrackId && last.track.id === tr.lastTrackId) {
+                        incomingForLookahead = tr.lastTrackId;
                     }
-
-                    let nextStep = window.findNextTrack(g, lookFromNode, targetStation.trackIds, incomingForLookahead);
+                    let nextStep = window.findNextTrack(g, last.toNode, targetStation.trackIds, incomingForLookahead);
                     if (!nextStep) break;
                     let nextTrack = window.tracks.find(x => x.id === nextStep.trackId);
                     if (!nextTrack) break;
                     // Avoid duplicate entries
                     if (tr.history.some(h => h.track && h.track.id === nextTrack.id && Math.abs(h.startDist - last.endDist) < 0.1)) break;
-                    // Don't re-append the platform track we're currently stopped on
-                    if (tr.lastTrackId && nextTrack.id === tr.lastTrackId) break;
                     tr.history.push({
                         track: nextTrack, fromNode: last.toNode, toNode: nextStep.to,
                         startDist: last.endDist, endDist: last.endDist + nextTrack.length
                     });
-                    // Clear deferred exit-node and lastTrackId only after a successful forward extension
-                    tr.lastExitNode = null;
+                    // Once we've made the first extension away from the turnaround, clear lastTrackId
                     tr.lastTrackId = null;
                 }
             }
@@ -858,22 +842,17 @@ window.updateSim = function (dt) {
             if (tr.headDist + (tr.speed * dtSec) + 2 > currentSeg.endDist) {
                 let alreadyQueued = tr.history.some(h => h.startDist >= currentSeg.endDist - 0.1);
                 if (!alreadyQueued && targetStation && !targetStation.trackIds.includes(currentSeg.track.id.toString())) {
-                    // After turnaround/dwell, use lastTrackId so we don't reverse back into the platform
+                    // After turnaround, use lastTrackId so we don't reverse back into the platform
                     let incomingId = tr.lastTrackId || currentSeg.track.id;
-                    // Use lastExitNode if set (forced forward exit after dwell/turnaround)
-                    let fromNode = (tr.lastExitNode != null && tr.lastExitNode === currentSeg.toNode)
-                        ? tr.lastExitNode
-                        : currentSeg.toNode;
-                    let nextStep = window.findNextTrack(g, fromNode, targetStation.trackIds, incomingId);
+                    let nextStep = window.findNextTrack(g, currentSeg.toNode, targetStation.trackIds, incomingId);
                     if (nextStep) {
                         let nextTrack = window.tracks.find(x => x.id === nextStep.trackId);
-                        if (nextTrack && nextTrack.id !== tr.lastTrackId) {
+                        if (nextTrack) {
                             tr.history.push({
                                 track: nextTrack, fromNode: currentSeg.toNode, toNode: nextStep.to,
                                 startDist: currentSeg.endDist, endDist: currentSeg.endDist + nextTrack.length
                             });
                             tr.lastTrackId = null; // consumed — clear it
-                            tr.lastExitNode = null;
                         }
                     } else {
                         tr.speed = 0;
@@ -1007,23 +986,10 @@ window.updateSim = function (dt) {
                         tr.state = 'TURNAROUND';
                     }
                 } else {
-                    // Record ALL platform tracks in history as "just visited" so
-                    // pathfinding won't route us backward into any of them.
-                    // Use the head segment (last in history) as the primary block.
+                    // Record the current (platform) track so pathfinding won't
+                    // route us straight back into it when we resume DRIVING
                     let dwellSeg = tr.history[tr.history.length - 1];
-                    if (dwellSeg && dwellSeg.track) {
-                        tr.lastTrackId = dwellSeg.track.id;
-                        // Also remember the toNode we must exit FROM so look-ahead
-                        // always extends forward, never backward.
-                        tr.lastExitNode = dwellSeg.toNode;
-                    }
-                    // Trim any pre-planned look-ahead segments that were appended
-                    // beyond the stop position – they may point the wrong way after
-                    // a dwell.  Keep only segments the train body actually occupies.
-                    let tailKeep = tr.headDist - tr.trainLength - 10;
-                    while (tr.history.length > 1 && tr.history[tr.history.length - 1].startDist > tr.headDist + 0.5) {
-                        tr.history.pop();
-                    }
+                    if (dwellSeg && dwellSeg.track) tr.lastTrackId = dwellSeg.track.id;
                     tr.state = 'DRIVING';
                 }
             }
@@ -1088,12 +1054,8 @@ window.updateSim = function (dt) {
             tr.dirPhase = tr.dirPhase === 'inbound' ? 'outbound' : 'inbound';
             tr.nextStationIdx = 0;
             // Remember the current tail segment so look-ahead pathfinding won't
-            // immediately U-turn back into the platform we just left.
-            // Also set lastExitNode = the toNode of the NEW head segment (which is the
-            // reversed tail) so forward extensions always depart from the correct end.
-            let newHeadSeg = newHistory[newHistory.length - 1];
-            tr.lastTrackId = newHeadSeg ? newHeadSeg.track.id : null;
-            tr.lastExitNode = newHeadSeg ? newHeadSeg.toNode : null;
+            // immediately U-turn back into the platform we just left
+            tr.lastTrackId = newHistory[newHistory.length - 1] ? newHistory[newHistory.length - 1].track.id : null;
             tr.state = 'DRIVING';
         }
 
