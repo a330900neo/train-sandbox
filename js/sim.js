@@ -1,4 +1,4 @@
-// --- SIMULATION & DATA MODELS ---
+﻿// --- SIMULATION & DATA MODELS ---
 window.depots = [];
 window.selectedDepot = null;
 window.trains = [];
@@ -353,7 +353,7 @@ window.findNextTrack = function (graph, startNodeId, targetTrackIds, incomingTra
         let inDir = window._getEdgeDir(incomingId, nodeId);
         let outDir = window._getEdgeDir(candidateId, nodeId);
         if (inDir === null || outDir === null) return false;
-        return Math.abs(normalizeAngle(outDir - inDir)) < (Math.PI / 2);
+        return Math.abs(normalizeAngle(outDir - inDir)) < (Math.PI / 6);
     }
 
     // Check if we are already adjacent to the target
@@ -530,9 +530,6 @@ window.spawnTrainOnLine = function (line, dir, depot) {
     let tLen = (depot.carriages || 4) * 25 + Math.max(0, (depot.carriages || 4) - 1);
     let initialHeadDist = Math.max(tLen, depTrack.length);
 
-    // history  = segments the train has already traversed (for rear-carriage rendering)
-    // route    = planned future segments not yet reached by the head (for braking lookahead)
-    // The head always sits inside history[history.length-1].
     let newTrain = {
         id: 'TRN' + Math.floor(Math.random() * 100000),
         lineId: line.id, dirPhase: dir,
@@ -546,7 +543,6 @@ window.spawnTrainOnLine = function (line, dir, depot) {
             track: depTrack, fromNode: fromNode, toNode: toNode,
             startDist: 0, endDist: depTrack.length
         }],
-        route: [],   // future planned segments [{track, fromNode, toNode}]
         headDist: initialHeadDist
     };
     return newTrain;
@@ -744,201 +740,146 @@ window.updateSim = function (dt) {
 
             if (!currentSeg || !currentSeg.track) { tr.state = 'DESPAWNING'; return; }
 
-            let trMaxSpeedMs = tr.maxSpeed / 3.6;
-
-            // ---------------------------------------------------------------
-            // STEP 1: PRE-EMPTIVE LOOK-AHEAD PATHFINDING
-            // Extend history far enough ahead to always have the full platform
-            // in history before the train reaches it, so stop distance is exact.
-            // We keep extending until we've captured ALL platform tracks or
-            // we've looked far enough ahead.
-            // ---------------------------------------------------------------
+            // ── PROACTIVE LOOK-AHEAD ──────────────────────────────────────────────
+            // Extend history far enough ahead to know where the platform is before
+            // we reach it, and walk ALL platform tracks (not just the first one).
+            // history is always in travel order, so platEnd = the departure end.
             if (targetStation) {
-                let brakingLookahead = Math.max(
-                    (tr.speed * tr.speed) / (2 * tr.brake) + tr.trainLength + 300,
-                    500
-                );
-                let safetyCount = 0;
-                // Count how many of the target platform tracks are already in history
-                let platTracksInHistory = () => tr.history.filter(h => h.track && targetStation.trackIds.includes(h.track.id.toString())).length;
-                let lastHistSeg = () => tr.history[tr.history.length - 1];
-
-                while (safetyCount++ < 40) {
-                    let last = lastHistSeg();
-                    if (!last) break;
-                    let lookaheadEnd = last.endDist;
-                    let allPlatInHistory = platTracksInHistory() >= targetStation.trackIds.length;
-
-                    // Stop extending if we have all platform tracks AND enough lookahead distance
-                    if (allPlatInHistory && lookaheadEnd >= tr.headDist + brakingLookahead) break;
-                    // Also stop if we've gone far enough with partial platform captured (avoid infinite loop on broken maps)
-                    if (allPlatInHistory && lookaheadEnd >= tr.headDist + tr.trainLength * 2) break;
-
-                    // Use lastTrackId on the very first extension after a turnaround so we
-                    // don't U-turn back into the platform we just left.
-                    let incomingForLookahead = last.track.id;
-                    if (tr.lastTrackId && last.track.id === tr.lastTrackId) {
-                        incomingForLookahead = tr.lastTrackId;
+                let platIds = targetStation.trackIds.map(String);
+                let lookAhead = (tr.speed * tr.speed) / (2 * tr.brake) + tr.trainLength + 300;
+                let sanity = 0;
+                while (sanity++ < 50) {
+                    let last = tr.history[tr.history.length - 1];
+                    if (!last || !last.track) break;
+                    let coveredPlat = new Set(
+                        tr.history.filter(h => h.track && platIds.includes(h.track.id.toString()))
+                            .map(h => h.track.id.toString())
+                    );
+                    let allCovered = platIds.every(id => coveredPlat.has(id));
+                    if (allCovered && last.endDist >= tr.headDist + lookAhead) break;
+                    if (platIds.includes(last.track.id.toString())) {
+                        // Already on platform — walk remaining platform tracks via neighbours
+                        if (allCovered) break;
+                        let edges = g.get(last.toNode) || [];
+                        let nextPlatEdge = edges.find(e =>
+                            platIds.includes(e.trackId.toString()) && !coveredPlat.has(e.trackId.toString())
+                        );
+                        if (!nextPlatEdge) break;
+                        let nxtT = window.tracks.find(x => x.id === nextPlatEdge.trackId);
+                        if (!nxtT || last.track.id === nxtT.id) break;
+                        tr.history.push({
+                            track: nxtT, fromNode: last.toNode, toNode: nextPlatEdge.to,
+                            startDist: last.endDist, endDist: last.endDist + nxtT.length
+                        });
+                    } else {
+                        // Navigate toward platform
+                        let nxt = window.findNextTrack(g, last.toNode, targetStation.trackIds, last.track.id);
+                        if (!nxt) break;
+                        let nxtT = window.tracks.find(x => x.id === nxt.trackId);
+                        if (!nxtT || last.track.id === nxtT.id) break;
+                        tr.history.push({
+                            track: nxtT, fromNode: last.toNode, toNode: nxt.to,
+                            startDist: last.endDist, endDist: last.endDist + nxtT.length
+                        });
                     }
-                    let nextStep = window.findNextTrack(g, last.toNode, targetStation.trackIds, incomingForLookahead);
-                    if (!nextStep) break;
-                    let nextTrack = window.tracks.find(x => x.id === nextStep.trackId);
-                    if (!nextTrack) break;
-                    // Avoid duplicate entries
-                    if (tr.history.some(h => h.track && h.track.id === nextTrack.id && Math.abs(h.startDist - last.endDist) < 0.1)) break;
-                    tr.history.push({
-                        track: nextTrack, fromNode: last.toNode, toNode: nextStep.to,
-                        startDist: last.endDist, endDist: last.endDist + nextTrack.length
-                    });
-                    // Once we've made the first extension away from the turnaround, clear lastTrackId
-                    tr.lastTrackId = null;
                 }
             }
 
-            // ---------------------------------------------------------------
-            // STEP 2: COMPUTE EXACT STOP POSITION
-            // The stop target is where headDist should end up.
-            // Carriage bogie geometry (per carriage i):
-            //   front bogie: headDist - 4  - i*26
-            //   rear  bogie: headDist - 21 - i*26
-            // Last carriage (i = N-1) rear bogie: headDist - 21 - (N-1)*26
-            // Physical train rear: headDist - trainLength
-            //
-            // Goal: fit the whole train inside the platform.
-            //   stopHeadDist = platEnd - 4   (front bogie just inside far end)
-            //   verify rear  = stopHeadDist - trainLength >= platStart
-            // If train is longer than platform, centre the train on the platform.
-            // ---------------------------------------------------------------
-            let stopHeadDist = null; // will be set if platform is in history
+            currentSeg = tr.history[tr.history.length - 1];
 
+            // ── PLATFORM STOP TARGET ──────────────────────────────────────────────
+            // history is always in travel order, so platEnd (max endDist of platform
+            // segments) is the far/exit end in the direction of travel — regardless of
+            // which direction the track was physically laid.
+            // We stop the head FAR_END_BUFFER metres before that exit end so the body
+            // fills the platform toward the entry end.
+            let headStopDist = null;
             if (targetStation) {
-                let platSegs = tr.history.filter(h => h.track && targetStation.trackIds.includes(h.track.id.toString()));
-
+                let platIds = targetStation.trackIds.map(String);
+                let platSegs = tr.history.filter(h => h.track && platIds.includes(h.track.id.toString()));
                 if (platSegs.length > 0) {
                     let platStart = Math.min(...platSegs.map(h => h.startDist));
                     let platEnd = Math.max(...platSegs.map(h => h.endDist));
                     let platLen = platEnd - platStart;
-
-                    if (tr.trainLength <= platLen) {
-                        // Align: front bogie 4 m before far end → head at platEnd - 4
-                        stopHeadDist = platEnd - 4;
-                        // Safety: ensure rear fits inside
-                        let rear = stopHeadDist - tr.trainLength;
-                        if (rear < platStart) {
-                            // Push forward so rear is at platStart
-                            stopHeadDist = platStart + tr.trainLength;
-                        }
-                    } else {
-                        // Train longer than platform – centre it
-                        stopHeadDist = platStart + (platLen + tr.trainLength) / 2;
-                    }
+                    // Head stops this far from the far (exit) end of the platform.
+                    // 1 m gives a visually tight stop right at the end.
+                    const FAR_END_BUFFER = 1;
+                    headStopDist = platEnd - FAR_END_BUFFER;
+                    // If the train body would overshoot the entry end, pull head back
+                    // just enough so the tail doesn't stick out.
+                    let minHead = platStart + tr.trainLength;
+                    if (headStopDist < minHead) headStopDist = minHead;
+                    // Hard clamp: never past the exit edge
+                    headStopDist = Math.min(headStopDist, platEnd - FAR_END_BUFFER);
                 }
             }
 
-            // ---------------------------------------------------------------
-            // STEP 3: NORMAL END-OF-SEGMENT PATHFINDING
-            // (Only if look-ahead hasn't already queued the next seg)
-            // ---------------------------------------------------------------
-            if (tr.headDist + (tr.speed * dtSec) + 2 > currentSeg.endDist) {
-                let alreadyQueued = tr.history.some(h => h.startDist >= currentSeg.endDist - 0.1);
-                if (!alreadyQueued && targetStation && !targetStation.trackIds.includes(currentSeg.track.id.toString())) {
-                    // After turnaround, use lastTrackId so we don't reverse back into the platform
-                    let incomingId = tr.lastTrackId || currentSeg.track.id;
-                    let nextStep = window.findNextTrack(g, currentSeg.toNode, targetStation.trackIds, incomingId);
-                    if (nextStep) {
-                        let nextTrack = window.tracks.find(x => x.id === nextStep.trackId);
-                        if (nextTrack) {
-                            tr.history.push({
-                                track: nextTrack, fromNode: currentSeg.toNode, toNode: nextStep.to,
-                                startDist: currentSeg.endDist, endDist: currentSeg.endDist + nextTrack.length
-                            });
-                            tr.lastTrackId = null; // consumed — clear it
-                        }
-                    } else {
-                        tr.speed = 0;
-                    }
-                }
+            let distToStop = headStopDist !== null ? headStopDist - tr.headDist : Infinity;
+
+            // ── BRAKING TRIGGER ───────────────────────────────────────────────────
+            // Start braking when kinematic stop distance + generous margin is reached.
+            // A larger margin (50 m) means the controller starts feathering the brakes
+            // early, producing a smooth glide rather than a last-second slam.
+            if (headStopDist !== null && tr.state === 'DRIVING') {
+                let brakeDist = (tr.speed * tr.speed) / (2 * tr.brake);
+                if (distToStop <= brakeDist + 50) tr.state = 'BRAKING';
             }
 
-            // Memory cleanup — keep enough tail for rear carriages
-            while (tr.history.length > 1 && tr.headDist - tr.trainLength - 10 > tr.history[0].endDist) {
+            // ── MEMORY CLEANUP ────────────────────────────────────────────────────
+            while (tr.history.length > 1 && tr.headDist - tr.trainLength > tr.history[0].endDist)
                 tr.history.shift();
-            }
 
-            // ---------------------------------------------------------------
-            // STEP 4: SPEED CONTROL — single unified PD-style controller
-            //
-            // Every frame we compute the "ideal speed" at the current distance
-            // from the stop point, using v_ideal = sqrt(2 * brake * dist).
-            // This is a real-time self-correcting brake curve: if the train is
-            // too fast it brakes harder; if it overshot it still converges.
-            // Speed limits use the same curve for the nearest limit drop ahead.
-            // ---------------------------------------------------------------
-            let currentLimitMs = currentSeg.track.speedLimit ? currentSeg.track.speedLimit / 3.6 : trMaxSpeedMs;
-
-            // Find the most restrictive upcoming constraint:
-            //   a) station stop
-            //   b) speed limit reduction ahead
-            let targetSpeedMs = Math.min(trMaxSpeedMs, currentLimitMs);
-            let mustBrake = false;
-
-            // (a) Station braking constraint
-            if (stopHeadDist !== null) {
-                let distToStop = stopHeadDist - tr.headDist;
-
-                // Only enter BRAKING when we are still approaching (distToStop > 0)
-                // and we need to start decelerating. Never flip back to BRAKING after
-                // DRIVING resumes for the next station.
-                if (tr.state === 'DRIVING' && distToStop > 0 &&
-                    distToStop <= (tr.speed * tr.speed) / (2 * tr.brake) + 15) {
-                    tr.state = 'BRAKING';
-                }
-
-                if (tr.state === 'BRAKING') {
-                    // Ideal speed curve — recalculated every frame for real-time correction.
-                    // If distToStop <= 0 we've reached the stop point; target speed = 0.
-                    let idealSpeedForStop = distToStop > 0
-                        ? Math.sqrt(Math.max(0, 2 * tr.brake * distToStop))
-                        : 0;
-                    targetSpeedMs = Math.min(targetSpeedMs, idealSpeedForStop);
-                    mustBrake = true;
+            // ── SPEED LIMIT LOOK-AHEAD ────────────────────────────────────────────
+            let trMaxSpeedMs = tr.maxSpeed / 3.6;
+            let demandedSpeedMs = trMaxSpeedMs;
+            for (let h of tr.history) {
+                if (h.startDist > tr.headDist + 600) break;
+                let segLimitMs = h.track.speedLimit ? h.track.speedLimit / 3.6 : trMaxSpeedMs;
+                if (segLimitMs < demandedSpeedMs) {
+                    let distToSeg = Math.max(0, h.startDist - tr.headDist);
+                    let neededBrake = (tr.speed * tr.speed - segLimitMs * segLimitMs) / (2 * tr.brake);
+                    if (distToSeg <= neededBrake + 5) demandedSpeedMs = segLimitMs;
                 }
             }
+            let curLimitMs = currentSeg.track.speedLimit ? currentSeg.track.speedLimit / 3.6 : trMaxSpeedMs;
+            demandedSpeedMs = Math.min(demandedSpeedMs, curLimitMs, trMaxSpeedMs);
 
-            // (b) Speed limit look-ahead (applies even while DRIVING)
-            for (let hi = 0; hi < tr.history.length; hi++) {
-                let h = tr.history[hi];
-                if (!h || !h.track || h.endDist <= tr.headDist) continue;
-                let segLimit = h.track.speedLimit ? h.track.speedLimit / 3.6 : trMaxSpeedMs;
-                if (segLimit < tr.speed - 0.5) {
-                    let distToZone = Math.max(0, h.startDist - tr.headDist);
-                    let neededDist = (tr.speed * tr.speed - segLimit * segLimit) / (2 * tr.brake);
-                    if (distToZone <= neededDist + 5) {
-                        let idealForLimit = distToZone > 0
-                            ? Math.sqrt(Math.max(segLimit * segLimit, segLimit * segLimit + 2 * tr.brake * distToZone))
-                            : segLimit;
-                        targetSpeedMs = Math.min(targetSpeedMs, idealForLimit);
-                        mustBrake = true;
-                    }
-                    break;
+            // ── CLOSED-LOOP SPEED CONTROLLER ──────────────────────────────────────
+            // Target speed = sqrt(2 * brake * distToStop) — the kinematically correct
+            // speed to arrive at zero exactly at headStopDist.
+            // A 50 m head-start in the braking trigger means the train eases into this
+            // curve gently, producing a realistic glide rather than a hard stop.
+            // No teleporting; the train always decelerates naturally.
+            let targetSpeedMs;
+            if (tr.state === 'BRAKING' && headStopDist !== null) {
+                if (distToStop <= 0) {
+                    // At or past target — coast to a full stop
+                    targetSpeedMs = 0;
+                } else {
+                    let idealSpeed = Math.sqrt(2 * tr.brake * distToStop);
+                    targetSpeedMs = Math.min(idealSpeed, demandedSpeedMs);
                 }
-            }
-
-            // Apply speed: accelerate toward target, or clamp down to it
-            if (!mustBrake || targetSpeedMs > tr.speed) {
-                tr.speed += tr.accel * dtSec;
             } else {
-                tr.speed -= tr.brake * dtSec;
+                targetSpeedMs = demandedSpeedMs;
             }
-            // Hard clamp to the target every frame — this is the real-time correction
-            tr.speed = Math.min(tr.speed, targetSpeedMs);
-            if (tr.speed < 0) tr.speed = 0;
 
-            // Collision Avoidance
+            if (tr.speed > 0 || (targetSpeedMs !== undefined && targetSpeedMs > 0)) {
+                if (targetSpeedMs !== undefined) {
+                    if (tr.speed < targetSpeedMs - 0.01) {
+                        tr.speed += tr.accel * dtSec;
+                        if (tr.speed > targetSpeedMs) tr.speed = targetSpeedMs;
+                    } else if (tr.speed > targetSpeedMs + 0.01) {
+                        tr.speed -= tr.brake * dtSec;
+                        if (tr.speed < targetSpeedMs) tr.speed = targetSpeedMs;
+                    }
+                }
+                if (tr.speed < 0) tr.speed = 0;
+            }
+
+            // ── COLLISION AVOIDANCE ───────────────────────────────────────────────
             let safetyDist = (tr.speed * tr.speed) / (2 * tr.brake) + 20;
             let fPt = window.getPointOnHistory(tr.history, tr.headDist);
             let obstacleAhead = false;
-
             if (fPt) {
                 window.trains.forEach(other => {
                     if (other.id === tr.id || !other.history || other.history.length === 0) return;
@@ -952,25 +893,19 @@ window.updateSim = function (dt) {
                     }
                 });
             }
-
-            if (obstacleAhead) tr.speed -= tr.ebrake * dtSec;
-            if (tr.speed < 0) tr.speed = 0;
+            if (obstacleAhead) { tr.speed -= tr.ebrake * dtSec; if (tr.speed < 0) tr.speed = 0; }
 
             tr.headDist += tr.speed * dtSec;
 
-            // ---------------------------------------------------------------
-            // STEP 5: ARRIVAL — hard-snap headDist to stop point, no overshoot
-            // ---------------------------------------------------------------
-            if (tr.state === 'BRAKING' && stopHeadDist !== null) {
-                // Clamp: never overshoot the stop point
-                if (tr.headDist >= stopHeadDist) {
-                    tr.headDist = stopHeadDist;
+            // ── ARRIVAL DETECTION ─────────────────────────────────────────────────
+            // No teleport: only dwell when the train has physically stopped near target.
+            if (tr.state === 'BRAKING' && headStopDist !== null) {
+                let arrivedNaturally = tr.speed < 0.15 && distToStop < 3;
+                let overran = tr.headDist >= headStopDist; // passed the target
+                if (arrivedNaturally || overran) {
                     tr.speed = 0;
-                }
-                if (tr.speed === 0 && tr.headDist >= stopHeadDist - 1.0) {
-                    tr.headDist = stopHeadDist; // snap exactly
                     tr.state = 'DWELLING';
-                    tr.dwellTimer = targetStation ? (targetStation.dwell || 30) : 30;
+                    tr.dwellTimer = targetStation.dwell || 30;
                     tr.nextStationIdx++;
                 }
             }
@@ -986,76 +921,36 @@ window.updateSim = function (dt) {
                         tr.state = 'TURNAROUND';
                     }
                 } else {
-                    // Record the current (platform) track so pathfinding won't
-                    // route us straight back into it when we resume DRIVING
-                    let dwellSeg = tr.history[tr.history.length - 1];
-                    if (dwellSeg && dwellSeg.track) tr.lastTrackId = dwellSeg.track.id;
                     tr.state = 'DRIVING';
                 }
             }
         } else if (tr.state === 'TURNAROUND') {
-            // Reverse direction: the physical rear of the train becomes the new head.
-            // Flip traversal direction of each occupied segment and recalculate distances
-            // so the new headDist is exactly where the old physical tail was.
-
-            let oldHeadDist = tr.headDist;
-            let oldTailDist = tr.headDist - tr.trainLength;
-
-            // Find which old segment contained the tail, to compute the new head offset
-            let tailSeg = null, tailOffsetInSeg = 0;
-            for (let i = 0; i < tr.history.length; i++) {
-                let h = tr.history[i];
-                if (!h || !h.track) continue;
-                if (h.startDist <= oldTailDist && h.endDist >= oldTailDist) {
-                    tailSeg = h;
-                    tailOffsetInSeg = oldTailDist - h.startDist;
-                    break;
-                }
-            }
-
-            // Collect and flip only the segments the body occupies (reversed order)
+            // Reverse the history: rear becomes new head
             let newHistory = [];
+            let currentTailDist = tr.headDist - tr.trainLength;
+
             for (let i = tr.history.length - 1; i >= 0; i--) {
                 let h = tr.history[i];
                 if (!h || !h.track) continue;
-                if (h.endDist < oldTailDist - 0.1 || h.startDist > oldHeadDist + 0.1) continue;
-                newHistory.push({
-                    track: h.track,
-                    fromNode: h.toNode,
-                    toNode: h.fromNode,
-                    startDist: 0, endDist: h.track.length
-                });
+                if (h.endDist >= currentTailDist && h.startDist <= tr.headDist) {
+                    newHistory.push({
+                        track: h.track,
+                        fromNode: h.toNode, toNode: h.fromNode,
+                        startDist: 0, endDist: h.track.length
+                    });
+                }
             }
 
             if (newHistory.length === 0) { tr.state = 'DESPAWNING'; return; }
 
-            // Recompute cumulative distances
             let cumulative = 0;
-            newHistory.forEach(h => {
-                h.startDist = cumulative;
-                cumulative += h.track.length;
-                h.endDist = cumulative;
-            });
-
-            // Compute new headDist: in the reversed frame, the old tail becomes the head.
-            // The old tail was (tailOffsetInSeg) into tailSeg from its old start.
-            // In the reversed frame, tailSeg is now traversed backwards, so the same
-            // physical point is at (tailSeg.track.length - tailOffsetInSeg) from its new start.
-            let newHeadDist = cumulative; // fallback: use physical end of reversed history
-            if (tailSeg) {
-                let newSeg = newHistory.find(h => h.track.id === tailSeg.track.id);
-                if (newSeg) {
-                    newHeadDist = newSeg.startDist + (tailSeg.track.length - tailOffsetInSeg);
-                }
-            }
+            newHistory.forEach(h => { h.startDist = cumulative; cumulative += h.track.length; h.endDist = cumulative; });
 
             tr.history = newHistory;
-            tr.headDist = newHeadDist;
+            // FIX: head is at end of reversed history (which was the tail)
+            tr.headDist = cumulative;
             tr.dirPhase = tr.dirPhase === 'inbound' ? 'outbound' : 'inbound';
             tr.nextStationIdx = 0;
-            // Remember the current tail segment so look-ahead pathfinding won't
-            // immediately U-turn back into the platform we just left
-            tr.lastTrackId = newHistory[newHistory.length - 1] ? newHistory[newHistory.length - 1].track.id : null;
             tr.state = 'DRIVING';
         }
 
