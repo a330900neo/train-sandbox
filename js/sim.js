@@ -1,4 +1,4 @@
-// --- SIMULATION & DATA MODELS ---
+﻿// --- SIMULATION & DATA MODELS ---
 window.depots = [];
 window.selectedDepot = null;
 window.trains = [];
@@ -339,161 +339,67 @@ window._getEdgeDir = function (trackId, fromNodeId) {
     return normalizeAngle(dir2 + Math.PI);
 };
 
-// Dijkstra respecting one-way and rejecting sharp turns (>90° geometric angle)
-// Uses real geometric tangent angles at each node to determine if a turn is physically possible.
-// A turn is rejected if the angle between arrival tangent and departure tangent exceeds 90°.
-// Phase 1: strict (reject sharp) → Phase 2: with turnaround → Phase 3: allow sharp (last resort)
-window.findNextTrack = function (graph, startNodeId, targetTrackIds, incomingTrackId, _skipSharp) {
+// Dijkstra respecting one-way and avoiding sharp U-turns
+window.findNextTrack = function (graph, startNodeId, targetTrackIds, incomingTrackId) {
     let tIds = Array.isArray(targetTrackIds) ? targetTrackIds.map(String) : [targetTrackIds.toString()];
-    let skipSharp = _skipSharp || false;
 
-    // Compute the geometric turn angle at a node between incoming and candidate tracks.
-    // Returns the absolute angle between arrival tangent and departure tangent in [0, π].
-    // Arrival tangent = direction the train was heading when it arrived at the node.
-    //   This is the OPPOSITE of _getEdgeDir(incomingId, nodeId) which gives the "depart back" direction.
-    // Departure tangent = direction the train will head on the candidate track.
-    function computeTurnAngle(incomingId, candidateId, nodeId) {
-        let departBackDir = window._getEdgeDir(incomingId, nodeId);
-        let departFwdDir = window._getEdgeDir(candidateId, nodeId);
-        if (departBackDir === null || departFwdDir === null) return 0;
-        let arrivalDir = normalizeAngle(departBackDir + Math.PI);
-        return Math.abs(normalizeAngle(departFwdDir - arrivalDir));
+    // _getEdgeDir returns the direction you'd DEPART from a node along a track.
+    // inDir = direction departing BACK along the incoming track (opposite of how we arrived).
+    // outDir = direction departing along the candidate next track.
+    // A true U-turn means outDir ≈ inDir (diff ≈ 0) — going back the exact way we came.
+    // Going straight means outDir ≈ inDir + π (diff ≈ π) — which is FINE.
+    // So block when diff < π/6 (within 30° of reversing).
+    function isUTurn(incomingId, candidateId, nodeId) {
+        let inDir = window._getEdgeDir(incomingId, nodeId);
+        let outDir = window._getEdgeDir(candidateId, nodeId);
+        if (inDir === null || outDir === null) return false;
+        return Math.abs(normalizeAngle(outDir - inDir)) < (Math.PI / 6);
     }
 
-    // A sharp turn is one where the geometric angle between arrival and departure
-    // exceeds 90°. This is physically impossible for a train regardless of direction
-    // the track was placed (handles "opposite direction looks the same" for player).
-    function isSharpTurn(incomingId, candidateId, nodeId) {
-        return computeTurnAngle(incomingId, candidateId, nodeId) > (Math.PI / 2);
-    }
-
-    // Check immediate adjacency first
+    // Check if we are already adjacent to the target
     let immediates = (graph.get(startNodeId) || []).filter(e => tIds.includes(e.trackId.toString()));
     if (immediates.length > 0) {
-        if (incomingTrackId && !skipSharp) {
-            let nonSharp = immediates.find(e => !isSharpTurn(incomingTrackId, e.trackId, startNodeId));
-            if (nonSharp) return nonSharp;
+        if (incomingTrackId) {
+            let nonUTurn = immediates.find(e => !isUTurn(incomingTrackId, e.trackId, startNodeId));
+            if (nonUTurn) return nonUTurn;
         }
         return immediates[0];
     }
 
-    // Dijkstra with sharp turn rejection at ALL nodes (not just the start).
-    // State: (nodeId, incomingTrackId) so we can check the turn angle at every node.
-    let stateKey = (nId, incId) => nId + ':' + (incId || '');
-
     let q = [], distMap = new Map(), prev = new Map();
-    let startIncId = incomingTrackId || null;
-    let startKeyStr = stateKey(startNodeId, startIncId);
-    q.push({ id: startNodeId, incId: startIncId, cost: 0 });
-    distMap.set(startKeyStr, 0);
+    q.push({ id: startNodeId, cost: 0 }); distMap.set(startNodeId, 0);
 
     while (q.length > 0) {
-        q.sort((a, b) => a.cost - b.cost);
-        let u = q.shift();
-        let uKeyStr = stateKey(u.id, u.incId);
-
-        // Skip stale entries
-        if (u.cost > (distMap.get(uKeyStr) ?? Infinity)) continue;
+        q.sort((a, b) => a.cost - b.cost); let u = q.shift();
 
         let edges = graph.get(u.id) || [];
         for (let edge of edges) {
-            // Check sharp turn at this node (skip check if in fallback mode)
-            if (!skipSharp && u.incId && isSharpTurn(u.incId, edge.trackId, u.id)) continue;
+            // Skip U-turns only at the start node
+            if (u.id === startNodeId && incomingTrackId && isUTurn(incomingTrackId, edge.trackId, startNodeId)) continue;
 
             if (tIds.includes(edge.trackId.toString())) {
-                // Found target — trace back to get the first edge from start
-                let curr = u.id, currInc = u.incId, firstEdge = edge;
-                let traceKey = stateKey(curr, currInc);
-                while (prev.has(traceKey)) {
-                    let p = prev.get(traceKey);
-                    firstEdge = p.edge;
-                    curr = p.node;
-                    currInc = p.incId;
-                    traceKey = stateKey(curr, currInc);
+                let curr = u.id;
+                let firstEdge = edge;
+                while (prev.has(curr)) {
+                    firstEdge = prev.get(curr).edge;
+                    curr = prev.get(curr).node;
                 }
                 return firstEdge;
             }
 
             let alt = u.cost + edge.cost;
-            let vKeyStr = stateKey(edge.to, edge.trackId);
-            if (!distMap.has(vKeyStr) || alt < distMap.get(vKeyStr)) {
-                distMap.set(vKeyStr, alt);
-                prev.set(vKeyStr, { node: u.id, incId: u.incId, edge: edge });
-                q.push({ id: edge.to, incId: edge.trackId, cost: alt });
+            if (!distMap.has(edge.to) || alt < distMap.get(edge.to)) {
+                distMap.set(edge.to, alt); prev.set(edge.to, { node: u.id, edge: edge });
+                q.push({ id: edge.to, cost: alt });
             }
         }
     }
 
-    // Fallback: retry without sharp turn restriction (last resort for terminus etc.)
-    if (!skipSharp) {
-        return window.findNextTrack(graph, startNodeId, targetTrackIds, incomingTrackId, true);
+    // Retry without U-turn restriction (terminus or forced reversal)
+    if (incomingTrackId) {
+        return window.findNextTrack(graph, startNodeId, targetTrackIds, null);
     }
     return null;
-};
-
-// Find a path with turnaround: when no direct path exists (all require sharp turns),
-// find a nearby turnaround area (bidirectional track long enough for the train),
-// navigate there, stop, change cab/direction, then continue to target.
-// Returns the first edge toward the turnaround area, or null.
-window.findPathWithTurnaround = function (graph, startNodeId, targetTrackIds, incomingTrackId, trainLength) {
-    let tIds = Array.isArray(targetTrackIds) ? targetTrackIds.map(String) : [targetTrackIds.toString()];
-
-    // BFS from start node to find a suitable turnaround area
-    let visited = new Set();
-    let q = [{ id: startNodeId, dist: 0, firstEdge: null }];
-    visited.add(startNodeId);
-
-    while (q.length > 0) {
-        let u = q.shift();
-        let edges = graph.get(u.id) || [];
-
-        // Check if this node has a turnaround area (bidirectional track >= trainLength)
-        for (let edge of edges) {
-            let track = window.tracks.find(t => t.id === edge.trackId || t.id.toString() === edge.trackId.toString());
-            if (!track || track.oneWay !== 0) continue; // Must be bidirectional
-
-            // Check if this single track is long enough, or if connected bidirectional
-            // tracks form a long enough area
-            let totalLen = track.length;
-            if (totalLen >= trainLength) {
-                // Check if we can reach the target after turnaround from the OTHER end of this track
-                // After turnaround, we'd be at edge.to facing back toward u.id
-                // Incoming track after turnaround = edge.trackId (but traversed in reverse)
-                let testResult = window.findNextTrack(graph, edge.to, tIds, edge.trackId);
-                if (testResult) {
-                    // We can reach the target after turnaround!
-                    return u.firstEdge || edge; // First step toward turnaround
-                }
-            }
-
-            // Try extending with adjacent bidirectional tracks at the other end
-            let otherEdges = graph.get(edge.to) || [];
-            for (let oe of otherEdges) {
-                let otherTrack = window.tracks.find(t => t.id === oe.trackId || t.id.toString() === oe.trackId.toString());
-                if (!otherTrack || otherTrack.oneWay !== 0) continue;
-                if (totalLen + otherTrack.length >= trainLength) {
-                    let testResult = window.findNextTrack(graph, edge.to, tIds, edge.trackId);
-                    if (testResult) {
-                        return u.firstEdge || edge;
-                    }
-                }
-            }
-        }
-
-        // Continue BFS (limited range to avoid expensive search)
-        for (let edge of edges) {
-            if (!visited.has(edge.to) && u.dist + edge.cost < 5000) {
-                visited.add(edge.to);
-                q.push({
-                    id: edge.to,
-                    dist: u.dist + edge.cost,
-                    firstEdge: u.firstEdge || edge
-                });
-            }
-        }
-    }
-
-    return null; // No turnaround path found
 };
 
 window.calculateLinePathsAndSchedule = function (line) {
@@ -632,7 +538,7 @@ window.spawnTrainOnLine = function (line, dir, depot) {
         accel: depot.accel || 1.0, brake: depot.brake || 1.0, ebrake: depot.ebrake || 2.0,
         speed: 0, state: 'DRIVING',
         nextStationIdx: 0, dwellTimer: 0,
-        returningToDepot: false, stuckTimer: 0,
+        returningToDepot: false,
         history: [{
             track: depTrack, fromNode: fromNode, toNode: toNode,
             startDist: 0, endDist: depTrack.length
@@ -868,10 +774,6 @@ window.updateSim = function (dt) {
                     } else {
                         // Navigate toward platform
                         let nxt = window.findNextTrack(g, last.toNode, targetStation.trackIds, last.track.id);
-                        // If normal pathfinding fails, try turnaround as fallback
-                        if (!nxt) {
-                            nxt = window.findPathWithTurnaround(g, last.toNode, targetStation.trackIds, last.track.id, tr.trainLength);
-                        }
                         if (!nxt) break;
                         let nxtT = window.tracks.find(x => x.id === nxt.trackId);
                         if (!nxtT || last.track.id === nxtT.id) break;
@@ -995,41 +897,6 @@ window.updateSim = function (dt) {
 
             tr.headDist += tr.speed * dtSec;
 
-            // ── STUCK / END-OF-PATH HANDLING ──────────────────────────────────────
-            // If the train has moved past the end of its known history, clamp it and
-            // stop. This prevents teleporting or moving into void. The look-ahead will
-            // retry extending the path on the next tick. If stuck too long, try turnaround.
-            let lastKnownSeg = tr.history[tr.history.length - 1];
-            if (lastKnownSeg && tr.headDist > lastKnownSeg.endDist) {
-                tr.headDist = lastKnownSeg.endDist;
-                tr.speed = 0;
-                tr.stuckTimer = (tr.stuckTimer || 0) + dtSec;
-
-                // After being stuck for a while, try turnaround as a last resort
-                if (tr.stuckTimer > 10 && targetStation) {
-                    let last = tr.history[tr.history.length - 1];
-                    if (last && last.track) {
-                        let turnaroundStep = window.findPathWithTurnaround(g, last.toNode, targetStation.trackIds, last.track.id, tr.trainLength);
-                        if (turnaroundStep) {
-                            let nxtT = window.tracks.find(x => x.id === turnaroundStep.trackId);
-                            if (nxtT && nxtT.id !== last.track.id) {
-                                tr.history.push({
-                                    track: nxtT, fromNode: last.toNode, toNode: turnaroundStep.to,
-                                    startDist: last.endDist, endDist: last.endDist + nxtT.length
-                                });
-                                tr.stuckTimer = 0;
-                            }
-                        }
-                    }
-                }
-                // Despawn if stuck for way too long (2 minutes)
-                if (tr.stuckTimer > 120) {
-                    tr.state = 'DESPAWNING';
-                }
-            } else {
-                tr.stuckTimer = 0;
-            }
-
             // ── ARRIVAL DETECTION ─────────────────────────────────────────────────
             // No teleport: only dwell when the train has physically stopped near target.
             if (tr.state === 'BRAKING' && headStopDist !== null) {
@@ -1058,50 +925,33 @@ window.updateSim = function (dt) {
                 }
             }
         } else if (tr.state === 'TURNAROUND') {
-            // Change direction WITHOUT teleporting — like a driver changing cabs at a terminus.
-            // The train stays at its current physical position on the track but now faces the opposite way.
-            // Find the segment the train's head is currently on
-            let headSegIdx = -1;
-            for (let i = 0; i < tr.history.length; i++) {
+            // Reverse the history: rear becomes new head
+            let newHistory = [];
+            let currentTailDist = tr.headDist - tr.trainLength;
+
+            for (let i = tr.history.length - 1; i >= 0; i--) {
                 let h = tr.history[i];
-                if (tr.headDist >= h.startDist && tr.headDist <= h.endDist) {
-                    headSegIdx = i;
-                    break;
+                if (!h || !h.track) continue;
+                if (h.endDist >= currentTailDist && h.startDist <= tr.headDist) {
+                    newHistory.push({
+                        track: h.track,
+                        fromNode: h.toNode, toNode: h.fromNode,
+                        startDist: 0, endDist: h.track.length
+                    });
                 }
             }
-            if (headSegIdx < 0) headSegIdx = tr.history.length - 1;
-            let headSeg = tr.history[headSegIdx];
-            if (!headSeg || !headSeg.track) { tr.state = 'DESPAWNING'; return; }
 
-            let track = headSeg.track;
-            let sNodeId = window.nodes.find(n => Math.hypot(n.x - track.start.x, n.y - track.start.y) < 0.1)?.id;
-            let wasForward = (headSeg.fromNode === sNodeId);
+            if (newHistory.length === 0) { tr.state = 'DESPAWNING'; return; }
 
-            // Check one-way restriction: can we travel in the reverse direction?
-            if (wasForward && track.oneWay === 1) { tr.state = 'DESPAWNING'; return; }
-            if (!wasForward && track.oneWay === -1) { tr.state = 'DESPAWNING'; return; }
+            let cumulative = 0;
+            newHistory.forEach(h => { h.startDist = cumulative; cumulative += h.track.length; h.endDist = cumulative; });
 
-            // Compute position on track in reverse direction
-            let localDist = tr.headDist - headSeg.startDist;
-            let reverseLocalDist = track.length - localDist;
-
-            // Build new minimal history: current segment reversed
-            tr.history = [{
-                track: track,
-                fromNode: headSeg.toNode,
-                toNode: headSeg.fromNode,
-                startDist: 0,
-                endDist: track.length
-            }];
-
-            // Train stays at same physical position, now facing opposite direction
-            tr.headDist = reverseLocalDist;
-
-            // Switch direction phase and reset station index
+            tr.history = newHistory;
+            // FIX: head is at end of reversed history (which was the tail)
+            tr.headDist = cumulative;
             tr.dirPhase = tr.dirPhase === 'inbound' ? 'outbound' : 'inbound';
             tr.nextStationIdx = 0;
             tr.state = 'DRIVING';
-            tr.speed = 0;
         }
 
         if (window.selectedTrain && window.selectedTrain.id === tr.id) {
