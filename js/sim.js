@@ -261,7 +261,7 @@ window.renderScheduleList = function () {
     fleetSched.forEach((entry, idx) => {
         let li = document.createElement('li');
         li.style.cssText = 'display:flex; justify-content:space-between; padding:2px 4px; border-bottom:1px solid #eee; background:#e8f4ff;';
-        li.innerHTML = `<span>\u23F0 ${window.formatTime(entry.time)} \u2192 <b>${entry.count}</b> trains</span><button onclick="window.removeFleetEntry(${idx})" class="danger" style="padding:2px 6px;font-size:10px;">X</button>`;
+        li.innerHTML = `<span>⏰ ${window.formatTime(entry.time)} → <b>${entry.count}</b> trains</span><button onclick="window.removeFleetEntry(${idx})" class="danger" style="padding:2px 6px;font-size:10px;">X</button>`;
         list.appendChild(li);
     });
 
@@ -270,7 +270,7 @@ window.renderScheduleList = function () {
     deps.forEach((dep, idx) => {
         let li = document.createElement('li');
         li.style.cssText = 'display:flex; justify-content:space-between; padding:2px 4px; border-bottom:1px solid #eee;';
-        li.innerHTML = `<span>\uD83D\uDE82 ${window.formatTime(dep.time)}</span><button onclick="window.removeDeparture(${idx})" class="danger" style="padding:2px 6px;font-size:10px;">X</button>`;
+        li.innerHTML = `<span>🚂 ${window.formatTime(dep.time)}</span><button onclick="window.removeDeparture(${idx})" class="danger" style="padding:2px 6px;font-size:10px;">X</button>`;
         list.appendChild(li);
     });
 };
@@ -311,7 +311,7 @@ window.removeSecondary = function (idx) { window.sim.editingLine[window.sim.edit
 window.removeStation = function (idx) { window.sim.editingLine[window.sim.editingDir].stations.splice(idx, 1); window.refreshLineEditor(); };
 
 
-// --- DYNAMIC GRAPH & PATHFINDING (TOPOLOGICAL 2D) ---
+// --- DYNAMIC GRAPH CONSTRUCTION ---
 window.buildGraph = function () {
     let graph = new Map();
     if (!window.tracks || !window.nodes) return graph;
@@ -321,85 +321,101 @@ window.buildGraph = function () {
         if (!sNode || !eNode) return;
         if (!graph.has(sNode.id)) graph.set(sNode.id, []);
         if (!graph.has(eNode.id)) graph.set(eNode.id, []);
-        // FIX: oneWay=1 means start->end only (forward), oneWay=-1 means end->start only (backward)
-        if (t.oneWay !== -1) graph.get(sNode.id).push({ trackId: t.id, to: eNode.id, cost: t.length, speed: t.speedLimit || (t.type === 'arc' ? Math.min(160, 4.5 * Math.sqrt(t.radius)) : 160) });
-        if (t.oneWay !== 1) graph.get(eNode.id).push({ trackId: t.id, to: sNode.id, cost: t.length, speed: t.speedLimit || (t.type === 'arc' ? Math.min(160, 4.5 * Math.sqrt(t.radius)) : 160) });
+        let spd = t.speedLimit || (t.type === 'arc' ? Math.min(160, 4.5 * Math.sqrt(t.radius)) : 160);
+        if (t.oneWay !== -1) graph.get(sNode.id).push({ trackId: t.id, to: eNode.id, cost: t.length, speed: spd });
+        if (t.oneWay !== 1) graph.get(eNode.id).push({ trackId: t.id, to: sNode.id, cost: t.length, speed: spd });
     });
     return graph;
 };
 
-// Get outgoing direction angle from a node for a given track
+// Returns the departure direction angle from a node along a given track
 window._getEdgeDir = function (trackId, fromNodeId) {
     let t = window.tracks.find(x => x.id === trackId || x.id.toString() === trackId.toString());
     if (!t) return null;
     let sNode = window.nodes.find(n => Math.hypot(n.x - t.start.x, n.y - t.start.y) < 0.1);
-    if (sNode && sNode.id === fromNodeId) return t.dir1; // going forward
-    // going backward: direction is opposite of dir2
+    if (sNode && sNode.id === fromNodeId) return t.dir1;
     let dir2 = t.dir2 !== undefined ? t.dir2 : t.dir1;
     return normalizeAngle(dir2 + Math.PI);
 };
 
-// Dijkstra respecting one-way and avoiding sharp U-turns
-window.findNextTrack = function (graph, startNodeId, targetTrackIds, incomingTrackId) {
+function _isUTurn(incomingId, candidateId, nodeId) {
+    let inDir = window._getEdgeDir(incomingId, nodeId);
+    let outDir = window._getEdgeDir(candidateId, nodeId);
+    if (inDir === null || outDir === null) return false;
+    return Math.abs(normalizeAngle(outDir - inDir)) < (Math.PI / 6);
+}
+
+// =============================================================================
+// FULL PATH PRECOMPUTATION
+// Returns an ordered array of {trackId, fromNode, toNode, speed, cost} steps
+// from startNodeId to any track in targetTrackIds, avoiding U-turns at start.
+// =============================================================================
+window.computeFullPath = function (graph, startNodeId, targetTrackIds, incomingTrackId) {
     let tIds = Array.isArray(targetTrackIds) ? targetTrackIds.map(String) : [targetTrackIds.toString()];
 
-    // _getEdgeDir returns the direction you'd DEPART from a node along a track.
-    // inDir = direction departing BACK along the incoming track (opposite of how we arrived).
-    // outDir = direction departing along the candidate next track.
-    // A true U-turn means outDir ≈ inDir (diff ≈ 0) — going back the exact way we came.
-    // Going straight means outDir ≈ inDir + π (diff ≈ π) — which is FINE.
-    // So block when diff < π/6 (within 30° of reversing).
-    function isUTurn(incomingId, candidateId, nodeId) {
-        let inDir = window._getEdgeDir(incomingId, nodeId);
-        let outDir = window._getEdgeDir(candidateId, nodeId);
-        if (inDir === null || outDir === null) return false;
-        return Math.abs(normalizeAngle(outDir - inDir)) < (Math.PI / 6);
-    }
+    // Dijkstra with full backtrack support
+    let dist = new Map();
+    let prev = new Map(); // nodeId -> { fromNode, edge }
+    let pq = [{ id: startNodeId, cost: 0 }];
+    dist.set(startNodeId, 0);
+    let foundTargetEdge = null;
+    let foundAtNode = null;
 
-    // Check if we are already adjacent to the target
-    let immediates = (graph.get(startNodeId) || []).filter(e => tIds.includes(e.trackId.toString()));
-    if (immediates.length > 0) {
-        if (incomingTrackId) {
-            let nonUTurn = immediates.find(e => !isUTurn(incomingTrackId, e.trackId, startNodeId));
-            if (nonUTurn) return nonUTurn;
-        }
-        return immediates[0];
-    }
-
-    let q = [], distMap = new Map(), prev = new Map();
-    q.push({ id: startNodeId, cost: 0 }); distMap.set(startNodeId, 0);
-
-    while (q.length > 0) {
-        q.sort((a, b) => a.cost - b.cost); let u = q.shift();
+    while (pq.length > 0) {
+        pq.sort((a, b) => a.cost - b.cost);
+        let u = pq.shift();
+        let uCost = dist.get(u.id);
 
         let edges = graph.get(u.id) || [];
         for (let edge of edges) {
-            // Skip U-turns only at the start node
-            if (u.id === startNodeId && incomingTrackId && isUTurn(incomingTrackId, edge.trackId, startNodeId)) continue;
+            // Prevent U-turn only at the very first node
+            if (u.id === startNodeId && incomingTrackId && _isUTurn(incomingTrackId, edge.trackId, startNodeId)) continue;
 
-            if (tIds.includes(edge.trackId.toString())) {
-                let curr = u.id;
-                let firstEdge = edge;
-                while (prev.has(curr)) {
-                    firstEdge = prev.get(curr).edge;
-                    curr = prev.get(curr).node;
-                }
-                return firstEdge;
+            let alt = uCost + edge.cost;
+            if (!dist.has(edge.to) || alt < dist.get(edge.to)) {
+                dist.set(edge.to, alt);
+                prev.set(edge.to, { fromNode: u.id, edge });
+                pq.push({ id: edge.to, cost: alt });
             }
 
-            let alt = u.cost + edge.cost;
-            if (!distMap.has(edge.to) || alt < distMap.get(edge.to)) {
-                distMap.set(edge.to, alt); prev.set(edge.to, { node: u.id, edge: edge });
-                q.push({ id: edge.to, cost: alt });
+            // Check if this edge itself is the target
+            if (tIds.includes(edge.trackId.toString())) {
+                if (foundTargetEdge === null || alt < (foundTargetEdge._cost || Infinity)) {
+                    foundTargetEdge = { ...edge, _cost: alt };
+                    foundAtNode = u.id;
+                }
             }
         }
     }
 
-    // Retry without U-turn restriction (terminus or forced reversal)
-    if (incomingTrackId) {
-        return window.findNextTrack(graph, startNodeId, targetTrackIds, null);
+    if (!foundTargetEdge && incomingTrackId) {
+        // Retry without U-turn restriction (terminus or forced reversal)
+        return window.computeFullPath(graph, startNodeId, targetTrackIds, null);
     }
-    return null;
+    if (!foundTargetEdge) return null;
+
+    // Reconstruct path from startNodeId to foundAtNode, then add the target edge
+    let path = [];
+    let cur = foundAtNode;
+    while (cur !== startNodeId && prev.has(cur)) {
+        let p = prev.get(cur);
+        path.unshift({ trackId: p.edge.trackId, fromNode: p.fromNode, toNode: cur, speed: p.edge.speed, cost: p.edge.cost });
+        cur = p.fromNode;
+    }
+    // Add the final target edge
+    path.push({ trackId: foundTargetEdge.trackId, fromNode: foundAtNode, toNode: foundTargetEdge.to, speed: foundTargetEdge.speed, cost: foundTargetEdge.cost });
+
+    return path.length > 0 ? path : null;
+};
+
+// Legacy: returns only the FIRST step (kept for calculateLinePathsAndSchedule usage)
+window.findNextTrack = function (graph, startNodeId, targetTrackIds, incomingTrackId) {
+    let fullPath = window.computeFullPath(graph, startNodeId, targetTrackIds, incomingTrackId);
+    if (!fullPath || fullPath.length === 0) return null;
+    let first = fullPath[0];
+    // Reconstruct in the format callers expect
+    let edges = graph.get(startNodeId) || [];
+    return edges.find(e => e.trackId === first.trackId && e.to === first.toNode) || { trackId: first.trackId, to: first.toNode, cost: first.cost, speed: first.speed };
 };
 
 window.calculateLinePathsAndSchedule = function (line) {
@@ -407,7 +423,7 @@ window.calculateLinePathsAndSchedule = function (line) {
     let bufferMult = 1 / (1 - (line.buffer || 5) / 100);
 
     for (let dir of ['inbound', 'outbound']) {
-        line[dir].stationTimetable = []; // relative times in seconds from start
+        line[dir].stationTimetable = [];
         let st = line[dir].stations;
         let cumulativeTime = 0;
 
@@ -437,7 +453,6 @@ window.calculateLinePathsAndSchedule = function (line) {
         }
         line[dir].tripDuration = cumulativeTime;
     }
-    // Estimate round trip for fleet spreading
     line.roundTripTime = (line.inbound.tripDuration || 0) + (line.outbound.tripDuration || 0) + 120;
 };
 
@@ -456,26 +471,132 @@ window.getExactTrackPointAndDir = function (track, tParam, forward) {
     }
 }
 
-// History Array: [ {track: obj, fromNode: id, toNode: id, startDist: num, endDist: num} ]
+// History Array: [ {track, fromNode, toNode, startDist, endDist} ]
+// distFromTail is a monotonically increasing journey coordinate.
+//
+// Boundary rule: use half-open intervals [startDist, endDist) so a point
+// sitting exactly on a joint between two segments belongs to the NEXT segment,
+// not the previous one.  This prevents all bogies near a joint from snapping
+// to tParam=1 of the outgoing segment and clumping visually at track nodes.
 window.getPointOnHistory = function (history, distFromTail) {
     if (!history || history.length === 0) return null;
-    let seg = history.find(h => distFromTail >= h.startDist && distFromTail <= h.endDist);
-    if (!seg) seg = distFromTail < 0 ? history[0] : history[history.length - 1];
-    if (!seg || !seg.track) return null; // FIX: guard against undefined track
 
-    let localDist = distFromTail - seg.startDist;
-    let tStartNodeId = window.nodes.find(n => Math.hypot(n.x - seg.track.start.x, n.y - seg.track.start.y) < 0.1)?.id;
+    let seg = null;
+
+    // Walk segments in order; pick the first one whose half-open interval
+    // [startDist, endDist) contains distFromTail.  The very last segment uses
+    // a closed interval [startDist, endDist] so the head itself is always valid.
+    for (let i = 0; i < history.length; i++) {
+        let h = history[i];
+        let isLast = (i === history.length - 1);
+        if (distFromTail >= h.startDist && (isLast ? distFromTail <= h.endDist : distFromTail < h.endDist)) {
+            seg = h;
+            break;
+        }
+    }
+
+    // Fallback for positions outside the history range
+    if (!seg) {
+        seg = distFromTail < history[0].startDist ? history[0] : history[history.length - 1];
+    }
+
+    if (!seg || !seg.track) return null;
+
+    // localDist must be clamped to [0, track.length] so tParam stays in [0,1]
+    let localDist = Math.max(0, Math.min(seg.track.length, distFromTail - seg.startDist));
+
+    let tStartNodeId = window.nodes.find(
+        n => Math.hypot(n.x - seg.track.start.x, n.y - seg.track.start.y) < 0.1
+    )?.id;
     let isForward = (seg.fromNode === tStartNodeId);
 
-    let tParam = isForward ? (localDist / seg.track.length) : (1 - localDist / seg.track.length);
+    let tParam = isForward
+        ? (localDist / seg.track.length)
+        : (1 - localDist / seg.track.length);
+
     tParam = Math.max(0, Math.min(1, tParam));
     return window.getExactTrackPointAndDir(seg.track, tParam, isForward);
+};
+
+// =============================================================================
+// PLATFORM STOP POSITION
+// A platform can span multiple consecutive track segments.
+//
+// Algorithm:
+//   1. Sum the physical lengths of all platform tracks (from window.tracks).
+//   2. Find the entry point: the smallest startDist among platform segs in history.
+//   3. Platform spans [platEntryDist, platEntryDist + platTotalLength] in journey coords.
+//   4. Ideal head stop = platCenter + trainLength/2  (body centre == platform centre).
+//   5. Clamp: head stays within platform bounds.
+// =============================================================================
+window.getPlatformStopHeadDist = function (train, targetStation, history) {
+    let tIds = targetStation.trackIds.map(String);
+
+    // Total physical length of all platform tracks (known even before train enters)
+    let platTotalLength = 0;
+    for (let tid of tIds) {
+        let t = window.tracks.find(x => x.id.toString() === tid);
+        if (t) platTotalLength += t.length;
+    }
+    if (platTotalLength <= 0) return null;
+
+    // Platform segments already traversed / entered in history
+    let platSegs = history
+        .filter(h => h.track && tIds.includes(h.track.id.toString()))
+        .sort((a, b) => a.startDist - b.startDist);
+
+    if (platSegs.length === 0) return null;
+
+    // Journey-distance at which the train first enters the platform
+    let platEntryDist = platSegs[0].startDist;
+    let platExitDist = platEntryDist + platTotalLength;
+
+    // Centre of platform in journey coordinates
+    let platCenter = platEntryDist + platTotalLength / 2;
+
+    // Head position that centres the train body in the platform
+    let stopHeadDist = platCenter + train.trainLength / 2;
+
+    // Clamp: head must be at least 1 m inside platform, no further than exit
+    stopHeadDist = Math.max(platEntryDist + 1, Math.min(platExitDist, stopHeadDist));
+
+    return stopHeadDist;
+};
+
+// =============================================================================
+// LOOK-AHEAD BRAKING
+// Returns the braking distance needed to stop from a given speed.
+// Also returns the distance to the next station stop point across the
+// current history + any already-queued upcoming track segments.
+// =============================================================================
+window.getDistToStation = function (train, targetStation, history) {
+    if (!targetStation) return Infinity;
+
+    // Check if we're already past the start of the platform in history
+    let platSegs = history.filter(h => h.track && targetStation.trackIds.includes(h.track.id.toString()));
+
+    if (platSegs.length > 0) {
+        let stopHeadDist = window.getPlatformStopHeadDist(train, targetStation, history);
+        return stopHeadDist - train.headDist;
+    }
+
+    // Platform not yet in history — estimate distance via upcoming tracks in history
+    // (tracks queued ahead of headDist)
+    let currentSeg = history[history.length - 1];
+    if (!currentSeg) return Infinity;
+
+    // Distance remaining on current segment
+    let remaining = currentSeg.endDist - train.headDist;
+
+    // Walk earlier-queued segments (there may be none yet; estimation only)
+    // Return distance from headDist to the end of last known track + approx
+    return remaining + 9999; // Will trigger look-ahead pathfinding to extend history
 };
 
 // --- FLEET SCHEDULE HELPERS ---
 window.getTargetFleetSize = function (line, time) {
     let sched = line.fleetSchedule || [];
-    if (sched.length === 0) return null; // null = use legacy departure system
+    if (sched.length === 0) return null;
     let count = 0;
     for (let entry of sched) {
         if (time >= entry.time) count = entry.count;
@@ -483,15 +604,20 @@ window.getTargetFleetSize = function (line, time) {
     return count;
 };
 
+// =============================================================================
+// IMPROVED SPAWN: Pathfind first, pick the correct depot track + direction
+// =============================================================================
 window.spawnTrainOnLine = function (line, dir, depot) {
-    // Build graph once to determine connectivity
     let g = window.buildGraph();
     let depotTrackIds = new Set((depot.tracks || []).map(String));
+    let st = line[dir].stations;
+    if (!st || st.length === 0) return null;
+    let firstStationTrackIds = st[0].trackIds;
 
-    // Find which depot track has an external (non-depot) track connected, and which end
-    let depTrack = null;
-    let fromNode = null;
-    let toNode = null;
+    // Try each depot track and each direction (from->to and to->from)
+    // Pick the one that can actually reach the first station
+    let bestDepTrack = null, bestFromNode = null, bestToNode = null;
+    let bestPathLen = Infinity;
 
     for (let depTrackId of (depot.tracks || [])) {
         let candidate = window.tracks.find(t => t.id === depTrackId);
@@ -499,36 +625,60 @@ window.spawnTrainOnLine = function (line, dir, depot) {
 
         let sNodeId = window.nodes.find(n => Math.hypot(n.x - candidate.start.x, n.y - candidate.start.y) < 0.1)?.id;
         let eNodeId = window.nodes.find(n => Math.hypot(n.x - candidate.end.x, n.y - candidate.end.y) < 0.1)?.id;
+        if (!sNodeId || !eNodeId) continue;
 
-        let endExternal = (g.get(eNodeId) || []).some(e => !depotTrackIds.has(e.trackId.toString()));
-        let startExternal = (g.get(sNodeId) || []).some(e => !depotTrackIds.has(e.trackId.toString()));
+        // Try both exit ends (start-exit and end-exit)
+        for (let [fromNode, toNode] of [[sNodeId, eNodeId], [eNodeId, sNodeId]]) {
+            // Check if the exit end connects to external network
+            let externalEdges = (g.get(toNode) || []).filter(e => !depotTrackIds.has(e.trackId.toString()));
+            if (externalEdges.length === 0) continue;
 
-        if (endExternal || startExternal) {
-            depTrack = candidate;
-            // Exit from whichever end connects externally; tail at the other end
-            if (endExternal) {
-                fromNode = sNodeId;
-                toNode = eNodeId;
-            } else {
-                fromNode = eNodeId;
-                toNode = sNodeId;
+            // Pathfind from exit node to first station
+            let path = window.computeFullPath(g, toNode, firstStationTrackIds, candidate.id);
+            if (!path) continue;
+
+            let pathLen = path.reduce((s, p) => s + p.cost, 0) + candidate.length;
+            if (pathLen < bestPathLen) {
+                bestPathLen = pathLen;
+                bestDepTrack = candidate;
+                bestFromNode = fromNode;
+                bestToNode = toNode;
             }
-            break;
         }
     }
 
-    // Fallback: use first depot track with default direction if none has external connections
-    if (!depTrack) {
-        depTrack = window.tracks.find(t => t.id === depot.tracks[0]);
-        if (!depTrack) return null;
-        fromNode = window.nodes.find(n => Math.hypot(n.x - depTrack.start.x, n.y - depTrack.start.y) < 0.1)?.id;
-        toNode = window.nodes.find(n => Math.hypot(n.x - depTrack.end.x, n.y - depTrack.end.y) < 0.1)?.id;
+    // Fallback: find any depot track with external connection
+    if (!bestDepTrack) {
+        for (let depTrackId of (depot.tracks || [])) {
+            let candidate = window.tracks.find(t => t.id === depTrackId);
+            if (!candidate) continue;
+            let sNodeId = window.nodes.find(n => Math.hypot(n.x - candidate.start.x, n.y - candidate.start.y) < 0.1)?.id;
+            let eNodeId = window.nodes.find(n => Math.hypot(n.x - candidate.end.x, n.y - candidate.end.y) < 0.1)?.id;
+            if (!sNodeId || !eNodeId) continue;
+
+            for (let [fromNode, toNode] of [[sNodeId, eNodeId], [eNodeId, sNodeId]]) {
+                let ext = (g.get(toNode) || []).filter(e => !depotTrackIds.has(e.trackId.toString()));
+                if (ext.length > 0) {
+                    bestDepTrack = candidate; bestFromNode = fromNode; bestToNode = toNode;
+                    break;
+                }
+            }
+            if (bestDepTrack) break;
+        }
     }
 
-    if (!depTrack) return null;
+    // Final fallback
+    if (!bestDepTrack) {
+        bestDepTrack = window.tracks.find(t => t.id === depot.tracks[0]);
+        if (!bestDepTrack) return null;
+        bestFromNode = window.nodes.find(n => Math.hypot(n.x - bestDepTrack.start.x, n.y - bestDepTrack.start.y) < 0.1)?.id;
+        bestToNode = window.nodes.find(n => Math.hypot(n.x - bestDepTrack.end.x, n.y - bestDepTrack.end.y) < 0.1)?.id;
+    }
 
     let tLen = (depot.carriages || 4) * 25 + Math.max(0, (depot.carriages || 4) - 1);
-    let initialHeadDist = Math.max(tLen, depTrack.length);
+
+    // Place train tail at start of depot track, head inside depot
+    let initialHeadDist = Math.max(tLen, bestDepTrack.length);
 
     let newTrain = {
         id: 'TRN' + Math.floor(Math.random() * 100000),
@@ -539,9 +689,11 @@ window.spawnTrainOnLine = function (line, dir, depot) {
         speed: 0, state: 'DRIVING',
         nextStationIdx: 0, dwellTimer: 0,
         returningToDepot: false,
+        // Pre-computed route: list of {trackId, fromNode, toNode} steps to next station
+        plannedRoute: [],
         history: [{
-            track: depTrack, fromNode: fromNode, toNode: toNode,
-            startDist: 0, endDist: depTrack.length
+            track: bestDepTrack, fromNode: bestFromNode, toNode: bestToNode,
+            startDist: 0, endDist: bestDepTrack.length
         }],
         headDist: initialHeadDist
     };
@@ -570,7 +722,6 @@ window.advanceTrainPosition = function (train, line, dir, g, targetDist) {
             advanced += segRemaining;
             train.headDist = currentSeg.endDist;
 
-            // Check if we just passed through a station
             if (train.nextStationIdx < st.length && st[train.nextStationIdx].trackIds.includes(currentSeg.track.id.toString())) {
                 train.nextStationIdx++;
             }
@@ -612,6 +763,170 @@ window.estimateLineTripDistance = function (line, dir) {
     return totalDist;
 };
 
+// =============================================================================
+// EXTEND TRAIN HISTORY: look-ahead pathfinding to add upcoming track segments
+// Fills history LOOKAHEAD_DIST meters ahead of the head.
+// =============================================================================
+const ROUTE_LOOKAHEAD = 800; // meters of track to pre-load into history
+
+window.extendTrainHistory = function (train, g, targetStation) {
+    if (!targetStation) return;
+    let sanity = 0;
+    let platIds = targetStation.trackIds.map(String);
+
+    while (sanity++ < 200) {
+        let lastSeg = train.history[train.history.length - 1];
+        if (!lastSeg || !lastSeg.track) break;
+
+        let lastId = lastSeg.track.id.toString();
+        let lastIsOnPlat = platIds.includes(lastId);
+
+        if (lastIsOnPlat) {
+            // We're already inside the platform. Keep extending through the
+            // remaining platform tracks so the full platform is in history
+            // (needed for correct multi-track stop-position calculation).
+            // Count how many platform tracks are already at the tail of history.
+            let platInHistory = new Set(
+                train.history.filter(h => h.track && platIds.includes(h.track.id.toString()))
+                    .map(h => h.track.id.toString())
+            );
+            if (platInHistory.size >= platIds.length) break; // all loaded
+
+            // Find the next platform track continuing from the last segment
+            let nextPlatStep = window.findNextTrack(g, lastSeg.toNode, platIds, lastSeg.track.id);
+            if (!nextPlatStep) break;
+            if (train.history.some(h => h.track.id === nextPlatStep.trackId && h.fromNode === lastSeg.toNode)) break;
+            let nextPlatTrack = window.tracks.find(x => x.id === nextPlatStep.trackId);
+            if (!nextPlatTrack) break;
+
+            train.history.push({
+                track: nextPlatTrack,
+                fromNode: lastSeg.toNode, toNode: nextPlatStep.to,
+                startDist: lastSeg.endDist, endDist: lastSeg.endDist + nextPlatTrack.length
+            });
+            continue;
+        }
+
+        // Not yet on platform — stop extending once we're far enough ahead
+        let lookaheadEnd = lastSeg.endDist;
+        if (lookaheadEnd - train.headDist > ROUTE_LOOKAHEAD) break;
+
+        // Find next track toward the station
+        let nextStep = window.findNextTrack(g, lastSeg.toNode, platIds, lastSeg.track.id);
+        if (!nextStep) break;
+
+        // Don't add duplicates
+        if (train.history.some(h => h.track.id === nextStep.trackId && h.fromNode === lastSeg.toNode)) break;
+
+        let nextTrack = window.tracks.find(x => x.id === nextStep.trackId);
+        if (!nextTrack) break;
+
+        train.history.push({
+            track: nextTrack,
+            fromNode: lastSeg.toNode, toNode: nextStep.to,
+            startDist: lastSeg.endDist, endDist: lastSeg.endDist + nextTrack.length
+        });
+    }
+};
+
+// =============================================================================
+// COMPUTE STOP DISTANCE WITH LOOK-AHEAD
+// Returns distance from headDist to the computed stop position.
+// Returns Infinity if platform not yet visible in history.
+// =============================================================================
+window.computeDistToStop = function (train, targetStation, history) {
+    if (!targetStation) return Infinity;
+
+    let tIds = targetStation.trackIds.map(String);
+    let platSegs = history.filter(h => h.track && tIds.includes(h.track.id.toString()));
+    if (platSegs.length === 0) return Infinity; // Platform not yet in history
+
+    // For multi-track platforms, wait until ALL platform tracks are loaded into
+    // history before computing a stop distance.  If we compute too early the
+    // stop point is clamped to the end of whichever tracks ARE loaded — which
+    // for a multi-segment platform is a mid-platform node, causing the train to
+    // freeze there and back carriages to pile up behind it.
+    let platIdsInHistory = new Set(platSegs.map(h => h.track.id.toString()));
+    let allLoaded = tIds.every(id => platIdsInHistory.has(id));
+
+    if (!allLoaded) {
+        // Drive forward until all tracks load (extendTrainHistory handles this).
+        // Only force a stop if the head is very close to the expected exit to
+        // prevent overshooting a short platform.
+        let platEntryDist = Math.min(...platSegs.map(h => h.startDist));
+        let platTotalLength = 0;
+        for (let tid of tIds) {
+            let t = window.tracks.find(x => x.id.toString() === tid);
+            if (t) platTotalLength += t.length;
+        }
+        let platExitDist = platEntryDist + platTotalLength;
+        if (train.headDist < platExitDist - 5) return Infinity;
+    }
+
+    let stopHeadDist = window.getPlatformStopHeadDist(train, targetStation, history);
+    return stopHeadDist - train.headDist;
+};
+
+// Braking distance needed to stop from current speed
+function brakingDist(speed, brakeRate) {
+    return (speed * speed) / (2 * brakeRate);
+}
+
+// =============================================================================
+// TURNAROUND: flip train direction in-place, no teleport.
+//
+// The train is currently moving forward with its head at headDist.
+// After reversal the old tail becomes the new head.
+//
+// We reverse only the segments the train body currently occupies, re-index
+// them from 0, and set headDist = trainLength (the new head is at the far
+// end of the reversed segments, which corresponds to the old tail position).
+// =============================================================================
+window.performTurnaround = function (train) {
+    let tailDist = train.headDist - train.trainLength;
+
+    // Collect only the segments the train body overlaps
+    let occupied = train.history
+        .filter(h => h.endDist > tailDist && h.startDist < train.headDist)
+        .sort((a, b) => a.startDist - b.startDist); // ensure forward order
+
+    if (occupied.length === 0) {
+        train.state = 'DESPAWNING';
+        return false;
+    }
+
+    // Reverse and re-index
+    let reversed = [];
+    let cum = 0;
+    for (let i = occupied.length - 1; i >= 0; i--) {
+        let h = occupied[i];
+        if (!h || !h.track) continue;
+        reversed.push({
+            track: h.track,
+            fromNode: h.toNode,   // direction is now backwards
+            toNode: h.fromNode,
+            startDist: cum,
+            endDist: cum + h.track.length
+        });
+        cum += h.track.length;
+    }
+
+    if (reversed.length === 0) {
+        train.state = 'DESPAWNING';
+        return false;
+    }
+
+    train.history = reversed;
+
+    // The new head = old tail, which is now at the far end of the reversed
+    // segment array.  That distance is `cum` (total reversed length), but
+    // the train body only occupies trainLength metres, so the head sits at
+    // exactly trainLength from the new origin — provided cum >= trainLength.
+    train.headDist = Math.min(cum, train.trainLength);
+
+    return true;
+};
+
 // --- SIMULATION LOOP ---
 window.updateSim = function (dt) {
     window.sim.time += (dt / 1000) * window.sim.speed;
@@ -647,7 +962,6 @@ window.updateSim = function (dt) {
                 // === NEW FLEET COUNT SYSTEM ===
                 let targetCount = window.getTargetFleetSize(l, window.sim.time);
 
-                // Count active (non-returning) trains
                 let activeDirs = { inbound: 0, outbound: 0 };
                 window.trains.forEach(tr => {
                     if (tr.lineId === l.id && !tr.returningToDepot) {
@@ -661,14 +975,12 @@ window.updateSim = function (dt) {
                     let depot = window.depots.find(d => !d.line || d.line.includes(l.name) || d.line === '');
                     let hasBothDirs = l.inbound.stations.length > 0 && l.outbound.stations.length > 0;
 
-                    // Estimate trip distances for even spreading
                     let inTripDist = l.inbound.stations.length > 0 ? window.estimateLineTripDistance(l, 'inbound') : 0;
                     let outTripDist = l.outbound.stations.length > 0 ? window.estimateLineTripDistance(l, 'outbound') : 0;
                     let totalDist = inTripDist + outTripDist;
 
                     for (let i = 0; i < needed; i++) {
                         if (!depot) break;
-                        // Alternate directions for even spread
                         let dir;
                         if (!hasBothDirs) {
                             dir = l.inbound.stations.length > 0 ? 'inbound' : 'outbound';
@@ -680,25 +992,17 @@ window.updateSim = function (dt) {
                         let train = window.spawnTrainOnLine(l, dir, depot);
                         if (!train) continue;
 
-                        // Even spreading: offset each new train along the line
-                        // Space trains evenly across total round-trip distance
+                        // Even spreading
                         if (targetCount > 1 && totalDist > 0) {
                             let slotIndex = totalActive + i;
                             let spreadFraction = (slotIndex / targetCount) % 1.0;
-                            // Map fraction to position along inbound or outbound
                             let inFrac = inTripDist / totalDist;
                             let advanceDist;
                             if (spreadFraction < inFrac) {
-                                // Place in inbound
-                                if (dir !== 'inbound' && l.inbound.stations.length > 0) {
-                                    train.dirPhase = 'inbound';
-                                }
+                                if (dir !== 'inbound' && l.inbound.stations.length > 0) train.dirPhase = 'inbound';
                                 advanceDist = (spreadFraction / inFrac) * inTripDist;
                             } else {
-                                // Place in outbound
-                                if (dir !== 'outbound' && l.outbound.stations.length > 0) {
-                                    train.dirPhase = 'outbound';
-                                }
+                                if (dir !== 'outbound' && l.outbound.stations.length > 0) train.dirPhase = 'outbound';
                                 advanceDist = ((spreadFraction - inFrac) / (1 - inFrac)) * outTripDist;
                             }
                             if (advanceDist > 10) {
@@ -709,7 +1013,6 @@ window.updateSim = function (dt) {
                         window.trains.push(train);
                     }
                 } else if (totalActive > targetCount) {
-                    // Mark excess trains to return to depot after finishing their current bound
                     let excess = totalActive - targetCount;
                     let active = window.trains.filter(tr => tr.lineId === l.id && !tr.returningToDepot);
                     for (let i = 0; i < excess && i < active.length; i++) {
@@ -721,165 +1024,116 @@ window.updateSim = function (dt) {
     }
 
     // --- PHYSICS LOOP ---
-    // FIX: cap dtSec to prevent massive teleport jumps at high sim speed
     let dtSec = Math.min((dt / 1000) * window.sim.speed, 5.0);
 
     window.trains.forEach(tr => {
         let lObj = window.sim.lines.find(x => x.id === tr.lineId);
         if (!lObj) { tr.state = 'DESPAWNING'; return; }
 
-        // FIX: guard against empty or invalid history
         if (!tr.history || tr.history.length === 0 || !tr.history[tr.history.length - 1] || !tr.history[tr.history.length - 1].track) {
             tr.state = 'DESPAWNING'; return;
         }
 
         if (tr.state === 'DRIVING' || tr.state === 'BRAKING') {
-
-            let targetStation = lObj[tr.dirPhase].stations[tr.nextStationIdx];
+            let stations = lObj[tr.dirPhase].stations;
+            let targetStation = stations[tr.nextStationIdx];
             let currentSeg = tr.history[tr.history.length - 1];
 
             if (!currentSeg || !currentSeg.track) { tr.state = 'DESPAWNING'; return; }
 
-            // ── PROACTIVE LOOK-AHEAD ──────────────────────────────────────────────
-            // Extend history far enough ahead to know where the platform is before
-            // we reach it, and walk ALL platform tracks (not just the first one).
-            // history is always in travel order, so platEnd = the departure end.
-            if (targetStation) {
-                let platIds = targetStation.trackIds.map(String);
-                let lookAhead = (tr.speed * tr.speed) / (2 * tr.brake) + tr.trainLength + 300;
-                let sanity = 0;
-                while (sanity++ < 50) {
-                    let last = tr.history[tr.history.length - 1];
-                    if (!last || !last.track) break;
-                    let coveredPlat = new Set(
-                        tr.history.filter(h => h.track && platIds.includes(h.track.id.toString()))
-                            .map(h => h.track.id.toString())
-                    );
-                    let allCovered = platIds.every(id => coveredPlat.has(id));
-                    if (allCovered && last.endDist >= tr.headDist + lookAhead) break;
-                    if (platIds.includes(last.track.id.toString())) {
-                        // Already on platform — walk remaining platform tracks via neighbours
-                        if (allCovered) break;
-                        let edges = g.get(last.toNode) || [];
-                        let nextPlatEdge = edges.find(e =>
-                            platIds.includes(e.trackId.toString()) && !coveredPlat.has(e.trackId.toString())
-                        );
-                        if (!nextPlatEdge) break;
-                        let nxtT = window.tracks.find(x => x.id === nextPlatEdge.trackId);
-                        if (!nxtT || last.track.id === nxtT.id) break;
-                        tr.history.push({
-                            track: nxtT, fromNode: last.toNode, toNode: nextPlatEdge.to,
-                            startDist: last.endDist, endDist: last.endDist + nxtT.length
-                        });
-                    } else {
-                        // Navigate toward platform
-                        let nxt = window.findNextTrack(g, last.toNode, targetStation.trackIds, last.track.id);
-                        if (!nxt) break;
-                        let nxtT = window.tracks.find(x => x.id === nxt.trackId);
-                        if (!nxtT || last.track.id === nxtT.id) break;
-                        tr.history.push({
-                            track: nxtT, fromNode: last.toNode, toNode: nxt.to,
-                            startDist: last.endDist, endDist: last.endDist + nxtT.length
-                        });
-                    }
-                }
-            }
+            // --- LOOK-AHEAD: extend history toward next station ---
+            window.extendTrainHistory(tr, g, targetStation);
 
-            currentSeg = tr.history[tr.history.length - 1];
+            // --- COMPUTE DISTANCE TO STOP ---
+            let distToStop = window.computeDistToStop(tr, targetStation, tr.history);
 
-            // ── PLATFORM STOP TARGET ──────────────────────────────────────────────
-            // history is always in travel order, so platEnd (max endDist of platform
-            // segments) is the far/exit end in the direction of travel — regardless of
-            // which direction the track was physically laid.
-            // We stop the head FAR_END_BUFFER metres before that exit end so the body
-            // fills the platform toward the entry end.
-            let headStopDist = null;
-            if (targetStation) {
-                let platIds = targetStation.trackIds.map(String);
-                let platSegs = tr.history.filter(h => h.track && platIds.includes(h.track.id.toString()));
-                if (platSegs.length > 0) {
-                    let platStart = Math.min(...platSegs.map(h => h.startDist));
-                    let platEnd = Math.max(...platSegs.map(h => h.endDist));
-                    let platLen = platEnd - platStart;
-                    // Head stops this far from the far (exit) end of the platform.
-                    // 1 m gives a visually tight stop right at the end.
-                    const FAR_END_BUFFER = 1;
-                    headStopDist = platEnd - FAR_END_BUFFER;
-                    // If the train body would overshoot the entry end, pull head back
-                    // just enough so the tail doesn't stick out.
-                    let minHead = platStart + tr.trainLength;
-                    if (headStopDist < minHead) headStopDist = minHead;
-                    // Hard clamp: never past the exit edge
-                    headStopDist = Math.min(headStopDist, platEnd - FAR_END_BUFFER);
-                }
-            }
-
-            let distToStop = headStopDist !== null ? headStopDist - tr.headDist : Infinity;
-
-            // ── BRAKING TRIGGER ───────────────────────────────────────────────────
-            // Start braking when kinematic stop distance + generous margin is reached.
-            // A larger margin (50 m) means the controller starts feathering the brakes
-            // early, producing a smooth glide rather than a last-second slam.
-            if (headStopDist !== null && tr.state === 'DRIVING') {
-                let brakeDist = (tr.speed * tr.speed) / (2 * tr.brake);
-                if (distToStop <= brakeDist + 50) tr.state = 'BRAKING';
-            }
-
-            // ── MEMORY CLEANUP ────────────────────────────────────────────────────
-            while (tr.history.length > 1 && tr.headDist - tr.trainLength > tr.history[0].endDist)
-                tr.history.shift();
-
-            // ── SPEED LIMIT LOOK-AHEAD ────────────────────────────────────────────
+            // --- SPEED LIMIT ON CURRENT SEGMENT ---
             let trMaxSpeedMs = tr.maxSpeed / 3.6;
-            let demandedSpeedMs = trMaxSpeedMs;
+            let tLimit = currentSeg.track.speedLimit ? currentSeg.track.speedLimit / 3.6 : trMaxSpeedMs;
+            let speedCap = Math.min(trMaxSpeedMs, tLimit);
+
+            // Also check upcoming speed limits in history ahead
             for (let h of tr.history) {
-                if (h.startDist > tr.headDist + 600) break;
-                let segLimitMs = h.track.speedLimit ? h.track.speedLimit / 3.6 : trMaxSpeedMs;
-                if (segLimitMs < demandedSpeedMs) {
-                    let distToSeg = Math.max(0, h.startDist - tr.headDist);
-                    let neededBrake = (tr.speed * tr.speed - segLimitMs * segLimitMs) / (2 * tr.brake);
-                    if (distToSeg <= neededBrake + 5) demandedSpeedMs = segLimitMs;
-                }
-            }
-            let curLimitMs = currentSeg.track.speedLimit ? currentSeg.track.speedLimit / 3.6 : trMaxSpeedMs;
-            demandedSpeedMs = Math.min(demandedSpeedMs, curLimitMs, trMaxSpeedMs);
-
-            // ── CLOSED-LOOP SPEED CONTROLLER ──────────────────────────────────────
-            // Target speed = sqrt(2 * brake * distToStop) — the kinematically correct
-            // speed to arrive at zero exactly at headStopDist.
-            // A 50 m head-start in the braking trigger means the train eases into this
-            // curve gently, producing a realistic glide rather than a hard stop.
-            // No teleporting; the train always decelerates naturally.
-            let targetSpeedMs;
-            if (tr.state === 'BRAKING' && headStopDist !== null) {
-                if (distToStop <= 0) {
-                    // At or past target — coast to a full stop
-                    targetSpeedMs = 0;
-                } else {
-                    let idealSpeed = Math.sqrt(2 * tr.brake * distToStop);
-                    targetSpeedMs = Math.min(idealSpeed, demandedSpeedMs);
-                }
-            } else {
-                targetSpeedMs = demandedSpeedMs;
-            }
-
-            if (tr.speed > 0 || (targetSpeedMs !== undefined && targetSpeedMs > 0)) {
-                if (targetSpeedMs !== undefined) {
-                    if (tr.speed < targetSpeedMs - 0.01) {
-                        tr.speed += tr.accel * dtSec;
-                        if (tr.speed > targetSpeedMs) tr.speed = targetSpeedMs;
-                    } else if (tr.speed > targetSpeedMs + 0.01) {
-                        tr.speed -= tr.brake * dtSec;
-                        if (tr.speed < targetSpeedMs) tr.speed = targetSpeedMs;
+                if (h.startDist > tr.headDist && h.startDist < tr.headDist + 200) {
+                    let hLimit = h.track.speedLimit ? h.track.speedLimit / 3.6 : trMaxSpeedMs;
+                    if (hLimit < speedCap) {
+                        // Need to brake for upcoming speed limit
+                        let distToLimit = h.startDist - tr.headDist;
+                        let brakeDist = brakingDist(tr.speed, tr.brake);
+                        if (brakeDist >= distToLimit) speedCap = Math.min(speedCap, hLimit);
                     }
                 }
-                if (tr.speed < 0) tr.speed = 0;
             }
 
-            // ── COLLISION AVOIDANCE ───────────────────────────────────────────────
-            let safetyDist = (tr.speed * tr.speed) / (2 * tr.brake) + 20;
+            // ---------------------------------------------------------------
+            // KINEMATIC ADAPTIVE BRAKING
+            //
+            // At every tick we compute the *exact* deceleration that would
+            // bring the train to rest precisely at the stop point, then clamp
+            // it to the physical brake limits.  This replaces the old
+            // fixed-rate brake and the coarse "ease-zone" heuristic.
+            //
+            // Physics:  v² = u² + 2·a·s  →  a = (v² - u²) / (2·s)
+            // To stop (u=0) from current speed v over distance s:
+            //   required decel = v² / (2·s)
+            //
+            // We also blend in a small velocity-error term so the controller
+            // corrects any drift without hunting:
+            //   targetSpeed at distance s = sqrt(2 · brake · s)   (ideal curve)
+            //   correction   = k · (actualSpeed - targetSpeed)
+            //
+            // The combined decel is clamped to [0, ebrake] and applied.
+            // ---------------------------------------------------------------
+
+            // Required decel to stop from current speed over remaining dist
+            let requiredDecel = (distToStop > 0.01 && distToStop !== Infinity)
+                ? (tr.speed * tr.speed) / (2 * Math.max(distToStop, 0.1))
+                : 0;
+
+            // Ideal speed on the braking curve at this distance
+            let idealBrakeSpeed = (distToStop > 0 && distToStop !== Infinity)
+                ? Math.sqrt(2 * tr.brake * distToStop)
+                : 0;
+
+            // Velocity-error correction (proportional, gain ≈ 1.5)
+            let velError = tr.speed - idealBrakeSpeed;
+            let correctionDecel = (velError > 0) ? velError * 1.5 : 0;
+
+            // Total demanded decel: kinematic + correction, clamped to physical limits
+            let demandedDecel = Math.min(requiredDecel + correctionDecel, tr.ebrake);
+            demandedDecel = Math.max(demandedDecel, 0);
+
+            // Decide whether to enter braking mode:
+            // Start braking when required decel exceeds a soft threshold above
+            // normal brake rate (gives a small margin so we never overshoot).
+            let brakeTriggerThreshold = tr.brake * 0.85;
+            if (distToStop !== Infinity && distToStop >= 0 && requiredDecel >= brakeTriggerThreshold) {
+                tr.state = 'BRAKING';
+            } else if (tr.state === 'BRAKING' && distToStop > brakingDist(tr.speed, tr.brake) + 15) {
+                // Station moved away or we got a new target — resume driving
+                tr.state = 'DRIVING';
+            }
+
+            // --- ACCELERATION / BRAKING ---
+            if (tr.state === 'DRIVING') {
+                tr.speed += tr.accel * dtSec;
+                if (tr.speed > speedCap) tr.speed = speedCap;
+            } else if (tr.state === 'BRAKING') {
+                if (distToStop <= 0.2 || tr.speed < 0.05) {
+                    // Within snap-to-stop threshold
+                    tr.speed = 0;
+                } else {
+                    // Apply the kinematically-correct decel this tick
+                    tr.speed -= demandedDecel * dtSec;
+                    if (tr.speed < 0) tr.speed = 0;
+                }
+            }
+
+            // --- COLLISION AVOIDANCE ---
+            let safetyDist = brakingDist(tr.speed, tr.brake) + 20;
             let fPt = window.getPointOnHistory(tr.history, tr.headDist);
             let obstacleAhead = false;
+
             if (fPt) {
                 window.trains.forEach(other => {
                     if (other.id === tr.id || !other.history || other.history.length === 0) return;
@@ -893,17 +1147,37 @@ window.updateSim = function (dt) {
                     }
                 });
             }
-            if (obstacleAhead) { tr.speed -= tr.ebrake * dtSec; if (tr.speed < 0) tr.speed = 0; }
 
+            if (obstacleAhead) {
+                tr.speed -= tr.ebrake * dtSec;
+                if (tr.speed < 0) tr.speed = 0;
+            }
+
+            // --- ADVANCE POSITION ---
             tr.headDist += tr.speed * dtSec;
 
-            // ── ARRIVAL DETECTION ─────────────────────────────────────────────────
-            // No teleport: only dwell when the train has physically stopped near target.
-            if (tr.state === 'BRAKING' && headStopDist !== null) {
-                let arrivedNaturally = tr.speed < 0.15 && distToStop < 3;
-                let overran = tr.headDist >= headStopDist; // passed the target
-                if (arrivedNaturally || overran) {
-                    tr.speed = 0;
+            // --- TRANSITION TO NEXT SEGMENT if head crosses into new track ---
+            // (History is pre-extended; just keep tail clean)
+
+            // --- MEMORY CLEANUP ---
+            while (tr.history.length > 1 && tr.headDist - tr.trainLength > tr.history[0].endDist) {
+                tr.history.shift();
+                // Re-index startDist/endDist
+                if (tr.history.length > 0) {
+                    let offset = tr.history[0].startDist;
+                    if (offset > 0) {
+                        // Already absolute; no re-index needed
+                    }
+                }
+            }
+
+            // --- ARRIVED CHECK ---
+            if (targetStation && distToStop <= 0.3 && tr.speed === 0) {
+                // Snap head to exact stop position
+                let platSegs = tr.history.filter(h => h.track && targetStation.trackIds.includes(h.track.id.toString()));
+                if (platSegs.length > 0) {
+                    let stopHeadDist = window.getPlatformStopHeadDist(tr, targetStation, tr.history);
+                    tr.headDist = stopHeadDist;
                     tr.state = 'DWELLING';
                     tr.dwellTimer = targetStation.dwell || 30;
                     tr.nextStationIdx++;
@@ -915,48 +1189,113 @@ window.updateSim = function (dt) {
             if (tr.dwellTimer <= 0) {
                 let stations = lObj[tr.dirPhase].stations;
                 if (tr.nextStationIdx >= stations.length) {
+                    // ── Reached the terminal station ──────────────────────────
                     if (tr.returningToDepot) {
                         tr.state = 'DESPAWNING';
                     } else {
-                        tr.state = 'TURNAROUND';
+                        let newDir = tr.dirPhase === 'inbound' ? 'outbound' : 'inbound';
+                        let newStations = lObj[newDir].stations;
+
+                        if (!newStations || newStations.length === 0) {
+                            // No return route defined — just flip phase and restart
+                            tr.dirPhase = newDir;
+                            tr.nextStationIdx = 0;
+                            tr.state = 'DRIVING';
+                        } else {
+                            // ── Determine whether a physical turnaround is needed ──
+                            //
+                            // A turnaround is NOT needed when the train is already
+                            // positioned and oriented to drive directly toward the
+                            // first station of the new direction.
+                            //
+                            // We check this by asking the graph: from the node the
+                            // train's head is currently approaching (toNode of the
+                            // last history seg), can we reach newStations[0] WITHOUT
+                            // reversing?  If yes — no turnaround.
+                            //
+                            // "Shared terminus" (same track is both last inbound and
+                            // first outbound station) is the simplest case, but we
+                            // also handle cases where the terminal loop / runround
+                            // means the train is already facing the right way.
+
+                            let lastSeg = tr.history[tr.history.length - 1];
+                            let newFirstTids = newStations[0].trackIds.map(String);
+
+                            // Collect all platform track ids the train is currently on
+                            let curPlatTids = stations[stations.length - 1]
+                                ? stations[stations.length - 1].trackIds.map(String)
+                                : [];
+
+                            // Is the current terminal platform the same as the new
+                            // direction's first platform?  (shared terminus)
+                            let sharedTerminus = newFirstTids.some(id => curPlatTids.includes(id));
+
+                            // Can the train reach newStations[0] from its current
+                            // exit node WITHOUT a U-turn? (forward connectivity test)
+                            let forwardReachable = false;
+                            if (lastSeg) {
+                                let exitNode = lastSeg.toNode;
+                                let incomingTid = lastSeg.track.id;
+                                let fwdPath = window.computeFullPath(g, exitNode, newFirstTids, incomingTid);
+                                forwardReachable = (fwdPath !== null);
+                            }
+
+                            if (sharedTerminus || forwardReachable) {
+                                // No physical reversal — already pointing the right way.
+                                // Just flip the direction phase.
+                                // If the terminal is shared, skip station index 0
+                                // (we're already there); otherwise start from 0.
+                                tr.dirPhase = newDir;
+                                tr.nextStationIdx = sharedTerminus ? 1 : 0;
+                                // Trim look-ahead history beyond current head so
+                                // extendTrainHistory re-paths toward the new target
+                                tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
+                                tr.state = 'DRIVING';
+                            } else {
+                                // Physical turnaround needed
+                                tr.state = 'TURNAROUND';
+                            }
+                        }
                     }
                 } else {
                     tr.state = 'DRIVING';
                 }
             }
-        } else if (tr.state === 'TURNAROUND') {
-            // Reverse the history: rear becomes new head
-            let newHistory = [];
-            let currentTailDist = tr.headDist - tr.trainLength;
 
-            for (let i = tr.history.length - 1; i >= 0; i--) {
-                let h = tr.history[i];
-                if (!h || !h.track) continue;
-                if (h.endDist >= currentTailDist && h.startDist <= tr.headDist) {
-                    newHistory.push({
-                        track: h.track,
-                        fromNode: h.toNode, toNode: h.fromNode,
-                        startDist: 0, endDist: h.track.length
-                    });
+        } else if (tr.state === 'TURNAROUND') {
+            // Physically reverse the train in its current position
+            let ok = window.performTurnaround(tr);
+            if (!ok) return;
+
+            let newDir = tr.dirPhase === 'inbound' ? 'outbound' : 'inbound';
+
+            // After reversal, verify the new head is actually pointing toward
+            // the first station of the new direction.  If not (can happen with
+            // complex track geometry), despawn rather than rubber-band.
+            let newStations = lObj[newDir].stations;
+            if (newStations && newStations.length > 0) {
+                let lastSeg = tr.history[tr.history.length - 1];
+                if (lastSeg) {
+                    let testPath = window.computeFullPath(g, lastSeg.toNode, newStations[0].trackIds, lastSeg.track.id);
+                    if (!testPath) {
+                        // Can't reach first station from reversed position — despawn
+                        tr.state = 'DESPAWNING';
+                        return;
+                    }
                 }
             }
 
-            if (newHistory.length === 0) { tr.state = 'DESPAWNING'; return; }
-
-            let cumulative = 0;
-            newHistory.forEach(h => { h.startDist = cumulative; cumulative += h.track.length; h.endDist = cumulative; });
-
-            tr.history = newHistory;
-            // FIX: head is at end of reversed history (which was the tail)
-            tr.headDist = cumulative;
-            tr.dirPhase = tr.dirPhase === 'inbound' ? 'outbound' : 'inbound';
+            tr.dirPhase = newDir;
             tr.nextStationIdx = 0;
+            tr.speed = 0;
+            // Trim any stale look-ahead so re-pathing starts fresh
+            tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
             tr.state = 'DRIVING';
         }
 
         if (window.selectedTrain && window.selectedTrain.id === tr.id) {
             document.getElementById('train-info-speed').innerText = Math.round(tr.speed * 3.6);
-            document.getElementById('train-info-state').innerText = tr.state + (tr.returningToDepot ? ' [\u2192Depot]' : '');
+            document.getElementById('train-info-state').innerText = tr.state + (tr.returningToDepot ? ' [→Depot]' : '');
             document.getElementById('train-info-next').innerText = `Station ${tr.nextStationIdx + 1}`;
             if (lObj) document.getElementById('train-info-line').innerText = lObj.name;
         }
