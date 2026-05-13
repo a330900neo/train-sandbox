@@ -1,4 +1,4 @@
-const canvas = document.getElementById('gameCanvas');
+﻿const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
 // --- GAME & MAP STATE ---
@@ -15,6 +15,7 @@ window.nodes = [];
 window.platforms = [];
 window.platformBoundaries = [];
 window.platformNodes = [];
+window.turnaroundAreas = [];
 
 let mode = 'build';
 let camera = { x: startMx, y: startMy, zoom: 0.5 };
@@ -393,8 +394,8 @@ canvas.addEventListener('pointerdown', (e) => {
 
         if (mode === 'pan') return;
 
-        // Sim Train Selection
-        if (mode === 'select' && window.trains && window.trains.length > 0) {
+        // Sim Train Selection — works in any mode
+        if (window.trains && window.trains.length > 0) {
             let clickedTrain = null;
             window.trains.forEach(tr => {
                 let fPt = window.getPointOnHistory(tr.history, tr.headDist - 4);
@@ -406,8 +407,16 @@ canvas.addEventListener('pointerdown', (e) => {
                 document.getElementById('train-info-title').innerText = `Train ${clickedTrain.id.substring(3)}`;
                 let lObj = window.sim.lines.find(x => x.id === clickedTrain.lineId);
                 document.getElementById('train-info-line').innerText = lObj ? lObj.name : 'Unknown';
+
+                // Debug log to console
+                if (typeof window._downloadTrainDebugLog === 'function') {
+                    window._downloadTrainDebugLog(clickedTrain);
+                } else {
+                    console.warn('_downloadTrainDebugLog not found — raw train dump:');
+                    console.log(JSON.parse(JSON.stringify(clickedTrain, (k, v) => k === 'track' ? `[Track ${v && v.id}]` : v)));
+                }
                 return;
-            } else {
+            } else if (mode === 'select') {
                 window.selectedTrain = null;
                 document.getElementById('ui-train-info').classList.add('hidden');
             }
@@ -607,6 +616,22 @@ function updateSelectionUI() {
             uiSelectionLen.classList.remove('hidden');
             continuousPath = getContinuousPath(selectedTracks);
             if (continuousPath) uiSelectionPlatTools.classList.remove('hidden');
+
+            // Turnaround area status
+            let selIds = Array.from(selectedTracks).map(String);
+            let inArea = (window.turnaroundAreas || []).find(a => selIds.every(id => a.trackIds.includes(id)));
+            let btn = document.getElementById('btn-mark-turnaround');
+            let status = document.getElementById('turnaround-status');
+            if (inArea) {
+                btn.innerText = 'Unmark Turnaround Area';
+                btn.classList.add('active');
+                status.style.display = 'block';
+                status.innerText = `✓ ${selIds.length} track(s) in turnaround area`;
+            } else {
+                btn.innerText = 'Mark as Turnaround Area';
+                btn.classList.remove('active');
+                status.style.display = 'none';
+            }
         } else if (selectedPlatforms.size > 0 && selectedTracks.size === 0 && selectedNodes.size === 0) {
             uiSelectionColorProps.classList.remove('hidden');
             let firstId = Array.from(selectedPlatforms)[0];
@@ -806,11 +831,11 @@ document.getElementById('depot-slider-ang').oninput = (e) => { document.getEleme
 document.getElementById('depot-input-elev').onchange = (e) => { preview.depot.elev = parseFloat(e.target.value) || 0; };
 
 // Save / Load / Export / Import System
-document.getElementById('btn-save').onclick = () => { localStorage.setItem('railway_save', JSON.stringify({ tracks: window.tracks, nodes: window.nodes, camera, platforms: window.platforms, platformBoundaries: window.platformBoundaries, platformNodes: window.platformNodes, depots: window.depots, lines: window.sim.lines })); };
+document.getElementById('btn-save').onclick = () => { localStorage.setItem('railway_save', JSON.stringify({ tracks: window.tracks, nodes: window.nodes, camera, platforms: window.platforms, platformBoundaries: window.platformBoundaries, platformNodes: window.platformNodes, depots: window.depots, lines: window.sim.lines, turnaroundAreas: window.turnaroundAreas || [] })); };
 document.getElementById('btn-load').onclick = () => {
     const data = localStorage.getItem('railway_save');
     if (data) {
-        const parsed = JSON.parse(data); window.tracks = parsed.tracks; window.nodes = parsed.nodes; camera = parsed.camera; window.platforms = parsed.platforms || []; window.platformBoundaries = parsed.platformBoundaries || []; window.platformNodes = parsed.platformNodes || []; window.depots = parsed.depots || [];
+        const parsed = JSON.parse(data); window.tracks = parsed.tracks; window.nodes = parsed.nodes; camera = parsed.camera; window.platforms = parsed.platforms || []; window.platformBoundaries = parsed.platformBoundaries || []; window.platformNodes = parsed.platformNodes || []; window.depots = parsed.depots || []; window.turnaroundAreas = parsed.turnaroundAreas || [];
         if (parsed.lines) { window.sim.lines = parsed.lines; window.sim.editingLine = null; }
 
         window.sim.lines.forEach(l => {
@@ -827,7 +852,7 @@ document.getElementById('btn-load').onclick = () => {
     } else alert('No save file found.');
 };
 document.getElementById('btn-export').onclick = () => {
-    const blob = new Blob([JSON.stringify({ tracks: window.tracks, nodes: window.nodes, camera, platforms: window.platforms, platformBoundaries: window.platformBoundaries, platformNodes: window.platformNodes, depots: window.depots, lines: window.sim.lines })]);
+    const blob = new Blob([JSON.stringify({ tracks: window.tracks, nodes: window.nodes, camera, platforms: window.platforms, platformBoundaries: window.platformBoundaries, platformNodes: window.platformNodes, depots: window.depots, lines: window.sim.lines, turnaroundAreas: window.turnaroundAreas || [] })]);
     const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'railway_save.json'; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
 };
 document.getElementById('btn-import').onclick = () => document.getElementById('file-import').click();
@@ -836,7 +861,7 @@ document.getElementById('file-import').onchange = (e) => {
     reader.onload = (event) => {
         try {
             const parsed = JSON.parse(event.target.result);
-            window.tracks = parsed.tracks || []; window.nodes = parsed.nodes || []; camera = parsed.camera || camera; window.platforms = parsed.platforms || []; window.platformBoundaries = parsed.platformBoundaries || []; window.platformNodes = parsed.platformNodes || []; window.depots = parsed.depots || [];
+            window.tracks = parsed.tracks || []; window.nodes = parsed.nodes || []; camera = parsed.camera || camera; window.platforms = parsed.platforms || []; window.platformBoundaries = parsed.platformBoundaries || []; window.platformNodes = parsed.platformNodes || []; window.depots = parsed.depots || []; window.turnaroundAreas = parsed.turnaroundAreas || [];
             if (parsed.lines) { window.sim.lines = parsed.lines; window.sim.editingLine = null; }
 
             window.sim.lines.forEach(l => {
@@ -892,6 +917,38 @@ document.getElementById('btn-delete').onclick = () => {
 document.getElementById('btn-apply-speed').onclick = () => {
     const val = document.getElementById('input-speed').value; const newSpeed = val ? parseFloat(val) : null;
     selectedTracks.forEach(id => { const t = window.tracks.find(x => x.id === id); if (t) t.speedLimit = newSpeed; });
+};
+
+document.getElementById('btn-mark-turnaround').onclick = () => {
+    if (!window.turnaroundAreas) window.turnaroundAreas = [];
+    let selIds = Array.from(selectedTracks).map(String);
+    if (selIds.length === 0) return;
+
+    // Check if all selected tracks are already part of an area
+    let existingArea = window.turnaroundAreas.find(a => selIds.every(id => a.trackIds.includes(id)));
+    if (existingArea) {
+        // Unmark — remove those tracks from the area (or delete area if empty)
+        existingArea.trackIds = existingArea.trackIds.filter(id => !selIds.includes(id));
+        if (existingArea.trackIds.length === 0) {
+            window.turnaroundAreas = window.turnaroundAreas.filter(a => a.id !== existingArea.id);
+        }
+        document.getElementById('btn-mark-turnaround').innerText = 'Mark as Turnaround Area';
+        document.getElementById('btn-mark-turnaround').classList.remove('active');
+        document.getElementById('turnaround-status').style.display = 'none';
+    } else {
+        // Mark — find or create area containing all selected tracks
+        let partialArea = window.turnaroundAreas.find(a => selIds.some(id => a.trackIds.includes(id)));
+        if (partialArea) {
+            // Merge into existing area
+            selIds.forEach(id => { if (!partialArea.trackIds.includes(id)) partialArea.trackIds.push(id); });
+        } else {
+            window.turnaroundAreas.push({ id: Date.now() + Math.random(), trackIds: selIds });
+        }
+        document.getElementById('btn-mark-turnaround').innerText = 'Unmark Turnaround Area';
+        document.getElementById('btn-mark-turnaround').classList.add('active');
+        document.getElementById('turnaround-status').style.display = 'block';
+        document.getElementById('turnaround-status').innerText = `✓ ${selIds.length} track(s) in turnaround area`;
+    }
 };
 
 document.getElementById('btn-oneway').onclick = () => {
@@ -977,6 +1034,12 @@ function render() {
                 let inSt = window.sim.editingLine.inbound.stations.some(s => (s.trackIds && s.trackIds.includes(t.id.toString())) || (s.sec && s.sec.includes(t.id.toString())));
                 let outSt = window.sim.editingLine.outbound.stations.some(s => (s.trackIds && s.trackIds.includes(t.id.toString())) || (s.sec && s.sec.includes(t.id.toString())));
                 if (inSt || outSt) { isSel = true; isCont = true; overrideColor = window.sim.editingLine.color; }
+            }
+
+            // Turnaround area highlight
+            if (!overrideColor && window.turnaroundAreas) {
+                let inTA = window.turnaroundAreas.some(a => a.trackIds.includes(t.id.toString()));
+                if (inTA) { overrideColor = '#00bcd4'; isCont = true; }
             }
 
             drawSegment(t, false, isSel, 'base', isCont, overrideColor);
