@@ -1177,7 +1177,12 @@ window.extendTrainHistory = function (train, g, targetStation) {
             break;
         }
 
-        if (train.history.some(h => h.track && h.track.id.toString() === nextStep.trackId.toString())) break;
+        // Prevent loops: block adding the same track from the same fromNode.
+        // Allow same track id from a different fromNode — legitimate after a terminal
+        // turnaround when the train re-enters the platform in the opposite direction.
+        if (train.history.some(h => h.track
+            && h.track.id.toString() === nextStep.trackId.toString()
+            && h.fromNode.toString() === lastSeg.toNode.toString())) break;
 
         let nextTrack = window.tracks.find(x => x.id === nextStep.trackId);
         if (!nextTrack) break;
@@ -1244,10 +1249,14 @@ function _extendTowardTurnaround(train, g) {
         let nextApproachStep = null;
 
         // Find the first approachPath entry whose fromNode matches lastSeg.toNode
-        // and whose track isn't already in history.
+        // and whose track isn't already in history IN THE SAME DIRECTION.
+        // Allow a track that appears in history in the opposite direction (reversed traversal
+        // when the turnaround area is behind the terminal and the train must back through it).
         for (let step of approachPath) {
             if (step.fromNode.toString() === lastSeg.toNode.toString()
-                && !train.history.some(h => h.track && h.track.id.toString() === step.trackId.toString())) {
+                && !train.history.some(h => h.track
+                    && h.track.id.toString() === step.trackId.toString()
+                    && h.fromNode.toString() === step.fromNode.toString())) {
                 nextApproachStep = step;
                 break;
             }
@@ -1345,6 +1354,13 @@ function brakingDist(speed, brakeRate) {
 // =============================================================================
 window.performTurnaround = function (train) {
     let tailDist = train.headDist - train.trainLength;
+
+    // If history doesn't reach back to the tail (e.g. segments were cleaned before
+    // TURNAROUND fired), clamp tailDist to the earliest available segment so we
+    // don't produce a zero-length reversed block that causes carriages to clip.
+    if (train.history.length > 0) {
+        tailDist = Math.max(tailDist, train.history[0].startDist);
+    }
 
     // Collect segments the train body overlaps, sorted earliest first.
     let occupied = train.history
@@ -1762,7 +1778,20 @@ window.updateSim = function (dt) {
                                 tr._turnaroundCooldown = 3.0;
                                 tr.state = 'DRIVING';
                             } else {
-                                // Physical turnaround needed
+                                // Physical reversal needed at terminal.
+                                //
+                                // Always do an immediate in-place reversal (TURNAROUND).
+                                // After flipping, the train faces back the way it came.
+                                // If there is a player-defined turnaround area behind the
+                                // terminal, extendTrainHistory discovers it on the next tick
+                                // via the normal dead-end → turnaround-area search path and
+                                // drives into it before continuing to the next station.
+                                //
+                                // We deliberately do NOT TURNAROUND_APPROACH from here:
+                                // the area is physically behind the current head, so the
+                                // approach logic (which extends history *forward*) cannot
+                                // reach it — the train ends up with distToStop=Infinity and
+                                // gets stuck / reverses onto the platform start node.
                                 tr.state = 'TURNAROUND';
                             }
                         }
@@ -1888,7 +1917,8 @@ window.updateSim = function (dt) {
             }
 
         } else if (tr.state === 'TURNAROUND_REVERSE') {
-            // Train is fully stopped inside turnaround area. Perform reversal then resume.
+            // Train is fully stopped inside a player-defined turnaround area.
+            // Perform reversal then resume driving toward the next station.
             let ok = window.performTurnaround(tr);
             if (!ok) { tr.state = 'DESPAWNING'; return; }
 
@@ -1909,7 +1939,6 @@ window.updateSim = function (dt) {
                 if (lastSeg) {
                     let testPath = window.computeFullPath(g, lastSeg.toNode, targetStation.trackIds, null, false);
                     if (!testPath) {
-                        // Try loose path
                         testPath = window.computeFullPath(g, lastSeg.toNode, targetStation.trackIds, null, true);
                         if (!testPath) {
                             console.warn('[SIM] TURNAROUND_REVERSE: still no path after reversal', tr.id);
@@ -1957,22 +1986,22 @@ window.updateSim = function (dt) {
 
             let newDir = tr.dirPhase === 'inbound' ? 'outbound' : 'inbound';
             let newStations = lObj[newDir].stations;
-            if (newStations && newStations.length > 0) {
-                let lastSeg = tr.history[tr.history.length - 1];
-                if (lastSeg) {
-                    // Use null: after reversal the same track id is U-turn to the pathfinder
-                    let testPath = window.computeFullPath(g, lastSeg.toNode, newStations[0].trackIds, null, true);
-                    if (!testPath) {
-                        tr.state = 'DESPAWNING';
-                        return;
-                    }
-                }
+            if (!newStations || newStations.length === 0) {
+                tr.state = 'DESPAWNING'; return;
             }
+
+            // Do NOT run a path-check here — after reversal the train is facing
+            // back along the platform and the first outbound station may only be
+            // reachable via a player-defined turnaround area that sits between the
+            // terminal and the rest of the route.  extendTrainHistory (called on the
+            // very next DRIVING tick with _turnaroundCooldown active) will find that
+            // area and navigate into it correctly.  A premature path-check that
+            // fails here would cause a spurious DESPAWN instead.
 
             tr.dirPhase = newDir;
             tr.nextStationIdx = 0;
             tr.speed = 0;
-            tr._turnaroundCooldown = 3.0; // prevent U-turn block on exit from reversed track
+            tr._turnaroundCooldown = 3.0; // lets extendTrainHistory use null incomingTrackId
             tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
             tr.state = 'DRIVING';
         }
