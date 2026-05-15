@@ -240,8 +240,21 @@ window.refreshLineEditor = function () {
     l[dir].stations.forEach((st, idx) => {
         let count = st.trackIds ? st.trackIds.length : 1;
         let li = document.createElement('li');
+        // Build display name: prefer platformNumber + stationName from any matching boundary
+        let displayName = '';
+        if (window.platformBoundaries && st.trackIds) {
+            let sortedIds = [...st.trackIds].sort().join(',');
+            let bnd = window.platformBoundaries.find(b => b.pathId === sortedIds);
+            if (bnd && (bnd.platformNumber || bnd.stationName)) {
+                let parts = [];
+                if (bnd.platformNumber) parts.push('Plat ' + bnd.platformNumber);
+                if (bnd.stationName) parts.push(bnd.stationName);
+                displayName = parts.join(' – ');
+            }
+        }
+        if (!displayName) displayName = st.sec ? 'Main+Sec' : 'Platform (' + count + 't)';
         li.innerHTML = `
-            <span style="flex:1; overflow:hidden; text-overflow:ellipsis;">${st.sec ? 'Main+Sec' : 'Platform (' + count + 't)'}</span>
+            <span style="flex:1; overflow:hidden; text-overflow:ellipsis;">${displayName}</span>
             <input type="number" value="${st.dwell}" onchange="window.updateDwell(${idx}, this.value)" title="Dwell(s)">s
             <button onclick="window.setSecondary(${idx})" style="${window.sim.settingSecondaryFor === idx ? 'background:orange' : ''}">+Sec</button>
             <button onclick="window.removeSecondary(${idx})" style="${!st.sec ? 'display:none' : ''}">Rem Sec</button>
@@ -762,9 +775,175 @@ window.findNextTrack = function (graph, startNodeId, targetTrackIds, incomingTra
         || { trackId: first.trackId, to: first.toNode, cost: first.cost, speed: first.speed };
 };
 
+// =============================================================================
+// PHYSICS-ACCURATE GHOST TRAIN SIMULATION
+//
+// Simulates a train running the full line at a fixed timestep using the same
+// acceleration / braking physics as real trains, including:
+//   - Acceleration to speed limit
+//   - Look-ahead braking for stations (exact kinematic braking curve)
+//   - Dwell time at each station
+//
+// Returns total elapsed seconds for one full one-way trip.
+// Used by calculateLinePathsAndSchedule to get accurate roundTripTime.
+// =============================================================================
+window.simulateLineTripTime = function (line, dir, depotRef) {
+    let g = window.buildGraph();
+    let st = line[dir].stations;
+    if (!st || st.length < 1) return 0;
+
+    // Gather train physics from depot (or use defaults)
+    let depot = depotRef || window.depots.find(d => !d.line || d.line.includes(line.name) || d.line === '');
+    let maxSpeedMs = ((depot && depot.maxSpeed) || 80) / 3.6;
+    let accel = (depot && depot.accel) || 1.0;
+    let brake = (depot && depot.brake) || 1.0;
+    let carriages = (depot && depot.carriages) || 4;
+    let trainLen = carriages * 25 + Math.max(0, carriages - 1);
+
+    // Build a flat list of track segments for the whole trip (like a real train history)
+    // Walk the graph from station 0 → station 1 → ... → station N-1
+    let segments = []; // [{track, speedLimitMs}]
+    let currNode = null;
+    // Find a starting node adjacent to station 0
+    for (let [nid, edges] of g.entries()) {
+        if (edges.some(e => st[0].trackIds.includes(e.trackId.toString()))) { currNode = nid; break; }
+    }
+    if (!currNode) return 0;
+
+    let prevTrack = null;
+    for (let i = 0; i < st.length - 1; i++) {
+        let sanity = 0;
+        while (sanity++ < 300) {
+            let step = window.findNextTrack(g, currNode, st[i + 1].trackIds, prevTrack);
+            if (!step) break;
+            let t = window.tracks.find(x => x.id === step.trackId);
+            if (!t) break;
+            let spd = t.speedLimit ? t.speedLimit / 3.6 : maxSpeedMs;
+            segments.push({ track: t, speedLimitMs: Math.min(spd, maxSpeedMs) });
+            prevTrack = step.trackId;
+            currNode = step.to;
+            if (st[i + 1].trackIds.includes(step.trackId.toString())) break;
+        }
+    }
+
+    if (segments.length === 0) return 0;
+
+    // Build cumulative distance markers so we can locate stations
+    let cumDist = 0;
+    let segRanges = segments.map(s => {
+        let start = cumDist;
+        cumDist += s.track.length;
+        return { start, end: cumDist };
+    });
+    let totalDist = cumDist;
+
+    // Locate stop positions (centre of each station track in journey coords)
+    // For each station (except the first which we start at), find where it appears in segments
+    let stopPositions = []; // journey-distance of each stop point
+    for (let i = 1; i < st.length; i++) {
+        let tIds = st[i].trackIds.map(String);
+        let platSegs = segments
+            .map((s, idx) => ({ s, idx, r: segRanges[idx] }))
+            .filter(x => tIds.includes(x.s.track.id.toString()));
+        if (platSegs.length === 0) continue;
+        let entryDist = platSegs[0].r.start;
+        let platLen = tIds.reduce((acc, tid) => {
+            let t = window.tracks.find(x => x.id.toString() === tid);
+            return acc + (t ? t.length : 0);
+        }, 0);
+        // Stop head at centre + half trainLen, clamped
+        let stopHd = entryDist + platLen / 2 + trainLen / 2;
+        stopHd = Math.max(entryDist + 1, Math.min(entryDist + platLen, stopHd));
+        stopPositions.push({ dist: stopHd, dwell: st[i].dwell || 30 });
+    }
+
+    // --- Physics simulation ---
+    // DT chosen small enough for accuracy but large enough to run fast
+    const DT = 0.5; // seconds per step
+    let pos = 0;    // headDist
+    let speed = 0;
+    let time = 0;
+    let stopIdx = 0;
+    let dwelling = 0; // dwell countdown
+
+    const brakeDist = (v, b) => (v * v) / (2 * b);
+
+    let maxSteps = Math.ceil(totalDist / (maxSpeedMs * DT)) * 4 + 10000;
+    for (let step = 0; step < maxSteps; step++) {
+        // Handle dwell
+        if (dwelling > 0) {
+            dwelling -= DT;
+            time += DT;
+            if (dwelling <= 0) {
+                dwelling = 0;
+                stopIdx++;
+            }
+            continue;
+        }
+
+        // Done when past last stop or end of track
+        if (pos >= totalDist || stopIdx >= stopPositions.length) {
+            // Advance remaining distance at current speed (tail of last segment)
+            break;
+        }
+
+        // Find current segment speed limit
+        let segIdx = segRanges.findIndex(r => pos >= r.start && pos < r.end);
+        if (segIdx < 0) segIdx = segments.length - 1;
+        let segLimitMs = segments[segIdx] ? segments[segIdx].speedLimitMs : maxSpeedMs;
+
+        // Look-ahead speed limit: find the tightest limit we must reach at upcoming segment boundaries
+        let effectiveCap = segLimitMs;
+        for (let si = segIdx + 1; si < segments.length; si++) {
+            let distToSeg = segRanges[si].start - pos;
+            let lim = segments[si].speedLimitMs;
+            if (lim >= effectiveCap) continue;
+            let maxNow = Math.sqrt(lim * lim + 2 * brake * distToSeg);
+            if (maxNow < effectiveCap) effectiveCap = maxNow;
+        }
+
+        // Braking curve for next station stop
+        let nextStop = stopPositions[stopIdx];
+        let distToStop = nextStop.dist - pos;
+        let idealStopSpeed = distToStop > 0 ? Math.sqrt(2 * brake * distToStop) : 0;
+        effectiveCap = Math.min(effectiveCap, idealStopSpeed);
+
+        // Accelerate or brake
+        if (speed < effectiveCap - 0.05) {
+            speed += accel * DT;
+            if (speed > effectiveCap) speed = effectiveCap;
+        } else if (speed > effectiveCap + 0.05) {
+            speed -= brake * DT;
+            if (speed < 0) speed = 0;
+        } else {
+            speed = effectiveCap;
+        }
+
+        let move = speed * DT;
+        // Don't overshoot stop point
+        if (distToStop <= move && distToStop >= 0) {
+            time += distToStop / Math.max(speed, 0.01);
+            pos = nextStop.dist;
+            speed = 0;
+            dwelling = nextStop.dwell;
+            continue;
+        }
+
+        pos += move;
+        time += DT;
+    }
+
+    return time;
+};
+
 window.calculateLinePathsAndSchedule = function (line) {
+    // Reset pre-sim calibration so the fast ghost run re-fires on next spawn cycle
+    line._tripTimeCalibrated = false;
     let g = window.buildGraph();
     let bufferMult = 1 / (1 - (line.buffer || 5) / 100);
+
+    // Find a depot that serves this line for physics parameters
+    let depot = window.depots.find(d => !d.line || d.line.includes(line.name) || d.line === '');
 
     for (let dir of ['inbound', 'outbound']) {
         line[dir].stationTimetable = [];
@@ -797,7 +976,22 @@ window.calculateLinePathsAndSchedule = function (line) {
         }
         line[dir].tripDuration = cumulativeTime;
     }
-    line.roundTripTime = (line.inbound.tripDuration || 0) + (line.outbound.tripDuration || 0) + 120;
+
+    // Override tripDuration with physics-accurate ghost train simulation.
+    // This replaces the naive distance/speed_limit estimate with actual
+    // accel/brake time, speed limit transitions, and dwell time included.
+    for (let dir of ['inbound', 'outbound']) {
+        if ((line[dir].stations || []).length > 0) {
+            let physTime = window.simulateLineTripTime(line, dir, depot);
+            if (physTime > 0) {
+                // Apply the user's buffer on top of physics sim time
+                line[dir].tripDuration = physTime * bufferMult;
+            }
+        }
+    }
+
+    // Round trip = both legs + a small turnaround buffer at each terminal (30s each)
+    line.roundTripTime = (line.inbound.tripDuration || 0) + (line.outbound.tripDuration || 0) + 60;
 };
 
 // --- BOGIE PHYSICS & TOPOLOGICAL 2D MAPPING ---
@@ -949,7 +1143,53 @@ window.getTargetFleetSize = function (line, time) {
 };
 
 // =============================================================================
-// IMPROVED SPAWN: Pathfind first, pick the correct depot track + direction
+// SECONDARY PLATFORM SELECTION
+// When a station has a secondary platform (st.sec) and the main platform
+// tracks are occupied by a stopped/dwelling train, the arriving train should
+// route to the secondary instead.
+//
+// "Occupied" here means: a DWELLING or REVERSING_TO_STOP train whose history
+// overlaps one of the main platform tracks.  Moving trains on the same track
+// are fine — we only divert to avoid stopping behind a standing train.
+// =============================================================================
+window.selectActiveStation = function (station) {
+    // No secondary defined — always use main
+    if (!station || !station.sec || station.sec.length === 0) return station;
+
+    let mainIds = station.trackIds.map(String);
+    let secIds = station.sec.map(String);
+
+    // Check if any train is currently DWELLING or REVERSING on the main platform
+    let mainBlocked = window.trains.some(tr => {
+        if (tr.state !== 'DWELLING' && tr.state !== 'REVERSING_TO_STOP') return false;
+        return tr.history && tr.history.some(h =>
+            h.track && mainIds.includes(h.track.id.toString()) &&
+            h.endDist > (tr.headDist - tr.trainLength) && h.startDist < tr.headDist
+        );
+    });
+
+    if (!mainBlocked) return station; // main free — use it
+
+    // Main is blocked; return a synthetic station pointing to secondary tracks
+    return { trackIds: secIds, dwell: station.dwell, sec: null };
+};
+
+window.isDepotTrackOccupied = function (depTrack) {
+    let tid = depTrack.id.toString();
+    return window.trains.some(tr => {
+        if (!tr.history) return false;
+        let tailDist = tr.headDist - tr.trainLength;
+        return tr.history.some(h =>
+            h.track && h.track.id.toString() === tid &&
+            h.endDist > tailDist && h.startDist < tr.headDist
+        );
+    });
+};
+
+// =============================================================================
+// IMPROVED SPAWN: Pathfind first, pick the correct depot track + direction.
+// Depot tracks are bidirectional — try both traversal directions.
+// Skip occupied depot tracks so multiple trains don't pile on the same track.
 // =============================================================================
 window.spawnTrainOnLine = function (line, dir, depot) {
     let g = window.buildGraph();
@@ -959,7 +1199,7 @@ window.spawnTrainOnLine = function (line, dir, depot) {
     let firstStationTrackIds = st[0].trackIds;
 
     // Build a lookup: depotTrackId -> [{fromNode, toNode, departDir}] from the graph.
-    // This is reliable because buildGraph embeds the correct departDir per traversal direction.
+    // Depot tracks are NOT one-way so we include both traversal directions.
     let depotEdgeMap = new Map(); // trackId -> array of {fromNode, toNode, departDir}
     for (let [nid, edges] of g) {
         for (let e of edges) {
@@ -975,6 +1215,10 @@ window.spawnTrainOnLine = function (line, dir, depot) {
     for (let depTrackId of (depot.tracks || [])) {
         let candidate = window.tracks.find(t => t.id === depTrackId);
         if (!candidate) continue;
+
+        // Skip if this depot track is currently occupied by another train
+        if (window.isDepotTrackOccupied(candidate)) continue;
+
         let traversals = depotEdgeMap.get(depTrackId) || depotEdgeMap.get(depTrackId.toString()) || [];
 
         for (let { fromNode, toNode } of traversals) {
@@ -998,11 +1242,12 @@ window.spawnTrainOnLine = function (line, dir, depot) {
         }
     }
 
-    // Fallback: any depot track whose toNode has any external connection
+    // Fallback: any non-occupied depot track whose toNode has any external connection
     if (!bestDepTrack) {
         outer: for (let depTrackId of (depot.tracks || [])) {
             let candidate = window.tracks.find(t => t.id === depTrackId);
             if (!candidate) continue;
+            if (window.isDepotTrackOccupied(candidate)) continue;
             let traversals = depotEdgeMap.get(depTrackId) || depotEdgeMap.get(depTrackId.toString()) || [];
             for (let { fromNode, toNode } of traversals) {
                 let ext = (g.get(toNode) || []).filter(e => !depotTrackIds.has(e.trackId.toString()));
@@ -1023,6 +1268,7 @@ window.spawnTrainOnLine = function (line, dir, depot) {
     let newTrain = {
         id: 'TRN' + Math.floor(Math.random() * 100000),
         lineId: line.id, dirPhase: dir,
+        depotId: depot.id, // remember home depot for return trip
         carriages: depot.carriages || 4, trainLength: tLen,
         color: depot.color || '#ff8800', maxSpeed: depot.maxSpeed || 60,
         accel: depot.accel || 1.0, brake: depot.brake || 1.0, ebrake: depot.ebrake || 2.0,
@@ -1309,6 +1555,104 @@ function _extendTowardTurnaround(train, g) {
         }
     }
 }
+// =============================================================================
+// EXTEND HISTORY TOWARD DEPOT (no loop-prevention guard)
+//
+// Returning trains must re-traverse tracks they already used going the other
+// way. The standard extendTrainHistory loop-prevention guard (same trackId +
+// same fromNode) blocks this. This function is identical in structure but
+// omits that guard, so the pathfinder can route back through already-seen
+// tracks in the opposite direction.
+// Still respects sharp-turn rejection and turnaround area logic.
+// =============================================================================
+function _extendTowardDepot(train, g, depotStation) {
+    if (!depotStation) return;
+
+    // If already committed to a turnaround en route to depot, extend toward it.
+    if (train._turnaroundTarget) {
+        _extendTowardTurnaround(train, g);
+        return;
+    }
+
+    let platIds = depotStation.trackIds.map(String);
+    let sanity = 0;
+
+    while (sanity++ < 200) {
+        let lastSeg = train.history[train.history.length - 1];
+        if (!lastSeg || !lastSeg.track) break;
+
+        let lastId = lastSeg.track.id.toString();
+        let lastIsOnPlat = platIds.includes(lastId);
+
+        // Already on a depot track — load all depot tracks into history
+        if (lastIsOnPlat) {
+            let platInHistory = new Set(
+                train.history.filter(h => h.track && platIds.includes(h.track.id.toString()))
+                    .map(h => h.track.id.toString())
+            );
+            if (platInHistory.size >= platIds.length) break;
+
+            let nextPlatStep = window.findNextTrack(g, lastSeg.toNode, platIds, lastSeg.track.id);
+            if (!nextPlatStep) break;
+            // Only block if same track traversed in exact same direction (true duplicate)
+            if (train.history.some(h => h.track
+                && h.track.id.toString() === nextPlatStep.trackId.toString()
+                && h.fromNode.toString() === lastSeg.toNode.toString()
+                && h.toNode.toString() === nextPlatStep.to.toString())) break;
+            let nextPlatTrack = window.tracks.find(x => x.id === nextPlatStep.trackId);
+            if (!nextPlatTrack) break;
+            train.history.push({
+                track: nextPlatTrack,
+                fromNode: lastSeg.toNode, toNode: nextPlatStep.to,
+                startDist: lastSeg.endDist, endDist: lastSeg.endDist + nextPlatTrack.length
+            });
+            continue;
+        }
+
+        let lookaheadEnd = lastSeg.endDist;
+        if (lookaheadEnd - train.headDist > ROUTE_LOOKAHEAD) break;
+
+        let inCooldown = (train._turnaroundCooldown || 0) > 0;
+        let incomingTidForStep = inCooldown ? null : lastSeg.track.id;
+        let nextStep = window.findNextTrack(g, lastSeg.toNode, platIds, incomingTidForStep, false);
+
+        if (!nextStep) {
+            // Dead-end — check for a turnaround area en route to depot
+            if (inCooldown && (train._turnaroundCooldown || 0) >= 2) {
+                train._turnaroundCooldown = 0;
+                inCooldown = false;
+            }
+            if (!inCooldown) {
+                let turnaround = window.findTurnaroundArea(g, lastSeg.toNode, lastSeg.track.id, train.trainLength);
+                if (turnaround) {
+                    train._turnaroundTarget = turnaround;
+                    train._needsTurnaround = false;
+                    _extendTowardTurnaround(train, g);
+                } else {
+                    train._needsTurnaround = true;
+                }
+            }
+            break;
+        }
+
+        // Loop guard: only block exact same-direction duplicate (fromNode AND toNode match).
+        // This allows re-traversal of a track in the OPPOSITE direction (return trip).
+        if (train.history.some(h => h.track
+            && h.track.id.toString() === nextStep.trackId.toString()
+            && h.fromNode.toString() === lastSeg.toNode.toString()
+            && h.toNode.toString() === nextStep.to.toString())) break;
+
+        let nextTrack = window.tracks.find(x => x.id === nextStep.trackId);
+        if (!nextTrack) break;
+
+        train.history.push({
+            track: nextTrack,
+            fromNode: lastSeg.toNode, toNode: nextStep.to,
+            startDist: lastSeg.endDist, endDist: lastSeg.endDist + nextTrack.length
+        });
+    }
+}
+
 // Returns distance from headDist to the computed stop position.
 // Returns Infinity if platform not yet visible in history.
 // =============================================================================
@@ -1456,10 +1800,14 @@ window.updateSim = function (dt) {
                     let deps = l[dir].departures || [];
                     deps.forEach(dep => {
                         if (window.sim.time >= dep.time - 180 && !dep.spawned) {
-                            let depot = window.depots.find(d => !d.line || d.line.includes(l.name) || d.line === '');
-                            if (depot && l[dir].stations.length > 0) {
-                                let train = window.spawnTrainOnLine(l, dir, depot);
-                                if (train) window.trains.push(train);
+                            // Use all depots that serve this line
+                            let lineDepots = window.depots.filter(d => !d.line || d.line.includes(l.name) || d.line === '');
+                            if (lineDepots.length > 0 && l[dir].stations.length > 0) {
+                                let spawned = false;
+                                for (let depot of lineDepots) {
+                                    let train = window.spawnTrainOnLine(l, dir, depot);
+                                    if (train) { window.trains.push(train); spawned = true; break; }
+                                }
                             }
                             dep.spawned = true;
                         }
@@ -1470,63 +1818,175 @@ window.updateSim = function (dt) {
                 // === NEW FLEET COUNT SYSTEM ===
                 let targetCount = window.getTargetFleetSize(l, window.sim.time);
 
-                let activeDirs = { inbound: 0, outbound: 0 };
-                window.trains.forEach(tr => {
-                    if (tr.lineId === l.id && !tr.returningToDepot) {
-                        activeDirs[tr.dirPhase] = (activeDirs[tr.dirPhase] || 0) + 1;
+                // ── FAST PRE-SIMULATION (runs once before first train spawns) ──
+                // When going from 0 → 1+ trains, run a physics-accurate ghost
+                // simulation at maximum speed to get the real round-trip time
+                // (including accel, brake, dwell, speed limits) BEFORE any trains
+                // appear. This means trains spawn already knowing accurate trip
+                // times, so they start at full speed and only regulate by actual
+                // time-gap to the train ahead — not by slot-position guesswork.
+                if (targetCount > 0 && !l._tripTimeCalibrated) {
+                    let lineDepots = window.depots.filter(d => !d.line || d.line.includes(l.name) || d.line === '');
+                    let depot = lineDepots[0] || null;
+                    let inPhys = 0, outPhys = 0;
+                    if ((l.inbound.stations || []).length > 0) {
+                        inPhys = window.simulateLineTripTime(l, 'inbound', depot);
                     }
-                });
-                let totalActive = activeDirs.inbound + activeDirs.outbound;
+                    if ((l.outbound.stations || []).length > 0) {
+                        outPhys = window.simulateLineTripTime(l, 'outbound', depot);
+                    }
+                    let bufferMult = 1 / (1 - (l.buffer || 5) / 100);
+                    if (inPhys > 0) l.inbound.tripDuration = inPhys * bufferMult;
+                    if (outPhys > 0) l.outbound.tripDuration = outPhys * bufferMult;
+                    l.roundTripTime = (l.inbound.tripDuration || 0) + (l.outbound.tripDuration || 0) + 60;
+                    l._tripTimeCalibrated = true;
+                }
+
+                // Count active trains (not returning to depot) on this line
+                let totalActive = window.trains.filter(tr => tr.lineId === l.id && !tr.returningToDepot).length;
+
+                // Collect all depots that serve this line
+                let lineDepots = window.depots.filter(d => !d.line || d.line.includes(l.name) || d.line === '');
 
                 if (totalActive < targetCount) {
                     let needed = targetCount - totalActive;
-                    let depot = window.depots.find(d => !d.line || d.line.includes(l.name) || d.line === '');
                     let hasBothDirs = l.inbound.stations.length > 0 && l.outbound.stations.length > 0;
 
+                    let inDuration = l.inbound.tripDuration || 0;
+                    let outDuration = l.outbound.tripDuration || 0;
+                    let roundTrip = (l.roundTripTime > 0 ? l.roundTripTime : inDuration + outDuration) || 1;
+
+                    // Distance estimates for advancing trains to their slot position
                     let inTripDist = l.inbound.stations.length > 0 ? window.estimateLineTripDistance(l, 'inbound') : 0;
                     let outTripDist = l.outbound.stations.length > 0 ? window.estimateLineTripDistance(l, 'outbound') : 0;
-                    let totalDist = inTripDist + outTripDist;
 
+                    // Build the full ideal slot list for targetCount trains so we can
+                    // assign directions properly via interleaving.
+                    // For a line with both directions, alternate inbound/outbound slots
+                    // evenly: slot 0 = in, slot 1 = out, slot 2 = in, etc.
+                    // Each direction's trains are spread evenly within that direction's
+                    // share of the round trip.
+                    // For one-direction lines, all slots go to that direction.
+                    function slotDir(idx, total) {
+                        if (!hasBothDirs) return l.inbound.stations.length > 0 ? 'inbound' : 'outbound';
+                        return idx % 2 === 0 ? 'inbound' : 'outbound';
+                    }
+                    function slotTimeOffset(idx, total) {
+                        // Each direction gets ceil(total/2) or floor(total/2) slots.
+                        // Within a direction, spread evenly across roundTrip.
+                        if (!hasBothDirs) return (idx / total) * roundTrip;
+                        let dir = slotDir(idx, total);
+                        // Rank of this slot within its direction (0, 1, 2...)
+                        let rank = Math.floor(idx / 2);
+                        let totalInDir = dir === 'inbound' ? Math.ceil(total / 2) : Math.floor(total / 2);
+                        if (totalInDir === 0) totalInDir = 1;
+                        let fracInDir = rank / totalInDir; // 0..1 position within that direction
+                        if (dir === 'inbound') return fracInDir * inDuration;
+                        else return inDuration + fracInDir * outDuration;
+                    }
+
+                    let spawnedCount = 0;
                     for (let i = 0; i < needed; i++) {
-                        if (!depot) break;
-                        let dir;
-                        if (!hasBothDirs) {
-                            dir = l.inbound.stations.length > 0 ? 'inbound' : 'outbound';
-                        } else {
-                            dir = (totalActive + i) % 2 === 0 ? 'inbound' : 'outbound';
-                        }
+                        let slotIndex = totalActive + i;
+                        let dir = slotDir(slotIndex, targetCount);
+                        let timeOffset = slotTimeOffset(slotIndex, targetCount);
+
                         if (l[dir].stations.length === 0) continue;
 
-                        let train = window.spawnTrainOnLine(l, dir, depot);
-                        if (!train) continue;
+                        // Time-into-direction for advance positioning
+                        let timeIntoDir = dir === 'inbound' ? timeOffset : timeOffset - inDuration;
+                        let dirDuration = dir === 'inbound' ? inDuration : outDuration;
+                        let dirDist = dir === 'inbound' ? inTripDist : outTripDist;
+                        let advanceDist = (dirDuration > 0 && dirDist > 0)
+                            ? (timeIntoDir / dirDuration) * dirDist
+                            : 0;
 
-                        // Even spreading
-                        if (targetCount > 1 && totalDist > 0) {
-                            let slotIndex = totalActive + i;
-                            let spreadFraction = (slotIndex / targetCount) % 1.0;
-                            let inFrac = inTripDist / totalDist;
-                            let advanceDist;
-                            if (spreadFraction < inFrac) {
-                                if (dir !== 'inbound' && l.inbound.stations.length > 0) train.dirPhase = 'inbound';
-                                advanceDist = (spreadFraction / inFrac) * inTripDist;
-                            } else {
-                                if (dir !== 'outbound' && l.outbound.stations.length > 0) train.dirPhase = 'outbound';
-                                advanceDist = ((spreadFraction - inFrac) / (1 - inFrac)) * outTripDist;
+                        // ── SPAWN DELAY ────────────────────────────────────────────────
+                        // Check real time-gap between this slot's intended offset and every
+                        // existing train's current journey position on the round trip.
+                        // We estimate each existing train's position in round-trip-seconds
+                        // by combining its dirPhase, estimated distance into that leg, and
+                        // the leg durations — so this works even on freshly spawned trains
+                        // whose _journeyTime may be seeded from a different reference.
+                        {
+                            let activeSameLine = window.trains.filter(t => t.lineId === l.id && !t.returningToDepot);
+                            if (activeSameLine.length > 0) {
+                                let idealGap = roundTrip / targetCount;
+                                // Clamp newPos into [0, roundTrip)
+                                let newPos = ((timeOffset % roundTrip) + roundTrip) % roundTrip;
+
+                                let tooClose = activeSameLine.some(other => {
+                                    // Estimate other train's position in round-trip-seconds.
+                                    // Use _journeyTime if available (accumulated since spawn),
+                                    // but seed it relative to the slot offset at spawn time.
+                                    let otherPos = ((other._journeyTime || 0) % roundTrip + roundTrip) % roundTrip;
+                                    let gap = Math.min(
+                                        (otherPos - newPos + roundTrip) % roundTrip,
+                                        (newPos - otherPos + roundTrip) % roundTrip
+                                    );
+                                    return gap < idealGap * 0.5;
+                                });
+                                if (tooClose) continue; // retry next tick
                             }
-                            if (advanceDist > 10) {
-                                window.advanceTrainPosition(train, l, train.dirPhase, g, advanceDist);
+                        }
+
+                        // Try each depot in turn
+                        let train = null;
+                        for (let depot of lineDepots) {
+                            train = window.spawnTrainOnLine(l, dir, depot);
+                            if (train) break;
+                        }
+                        if (!train) continue; // depot tracks all occupied
+
+                        // Record which slot this train occupies so it can regulate speed
+                        train._slotIndex = slotIndex;
+                        train._slotTotal = targetCount;
+                        train._roundTripTime = roundTrip;
+                        // Seed journey time to match the slot's ideal time offset
+                        // so headway regulation is correct from the very first tick
+                        train._journeyTime = timeOffset;
+
+                        // Advance train along the line to the pre-computed slot position
+                        if (advanceDist > 10 && dirDist > 0) {
+                            window.advanceTrainPosition(train, l, train.dirPhase, g, advanceDist);
+                        }
+
+                        // Physical proximity check: if advance failed (train still at depot)
+                        // and another train is also near the depot, defer spawn.
+                        {
+                            let headPt = window.getPointOnHistory(train.history, train.headDist);
+                            if (headPt) {
+                                let physTooClose = window.trains.some(other => {
+                                    if (other.lineId !== l.id || other.returningToDepot) return false;
+                                    let otherPt = window.getPointOnHistory(other.history, other.headDist);
+                                    if (!otherPt) return false;
+                                    let d = Math.hypot(headPt.x - otherPt.x, headPt.y - otherPt.y);
+                                    return d < train.trainLength * 1.5;
+                                });
+                                if (physTooClose) continue; // defer to next tick
                             }
                         }
 
                         window.trains.push(train);
+                        spawnedCount++;
                     }
+
                 } else if (totalActive > targetCount) {
+                    // Mark excess trains to return to depot
                     let excess = totalActive - targetCount;
                     let active = window.trains.filter(tr => tr.lineId === l.id && !tr.returningToDepot);
                     for (let i = 0; i < excess && i < active.length; i++) {
                         active[active.length - 1 - i].returningToDepot = true;
                     }
                 }
+
+                // Keep slot metadata up to date whenever fleet size changes
+                let allActive = window.trains.filter(tr => tr.lineId === l.id && !tr.returningToDepot);
+                allActive.forEach((tr, idx) => {
+                    tr._slotIndex = idx;
+                    tr._slotTotal = allActive.length;
+                    tr._roundTripTime = l.roundTripTime || 1;
+                });
             }
         });
     }
@@ -1545,9 +2005,11 @@ window.updateSim = function (dt) {
         if (tr.state === 'DRIVING' || tr.state === 'BRAKING') {
             // Tick turnaround cooldown (time-based so it works correctly at all sim speeds)
             if (tr._turnaroundCooldown > 0) tr._turnaroundCooldown -= dtSec;
+            // Accumulate journey time for headway regulation (driving portion)
+            if (tr._slotTotal > 1) tr._journeyTime = (tr._journeyTime || 0) + dtSec;
 
             let stations = lObj[tr.dirPhase].stations;
-            let targetStation = stations[tr.nextStationIdx];
+            let targetStation = window.selectActiveStation(stations[tr.nextStationIdx]);
             let currentSeg = tr.history[tr.history.length - 1];
 
             if (!currentSeg || !currentSeg.track) { tr.state = 'DESPAWNING'; return; }
@@ -1602,6 +2064,51 @@ window.updateSim = function (dt) {
             let speedCap = Math.min(trMaxSpeedMs, headSegLimitMs);
 
             // ---------------------------------------------------------------
+            // HEADWAY REGULATION (time-gap based)
+            //
+            // Look at the train AHEAD of us on the line. Measure the real-time
+            // gap between this train's departure time and the preceding train's.
+            // If we are running AHEAD of our target gap → slow down.
+            // We only do this when well clear of a station braking zone.
+            //
+            // Gap is measured in sim-time seconds, not position.
+            // This means trains that are all early/all late don't affect each other —
+            // only bunching (one train catching another) is corrected.
+            // ---------------------------------------------------------------
+            let withinBrakingZone = distToStop !== Infinity &&
+                distToStop < (tr.speed * tr.speed) / (2 * tr.brake) * 2.5 + 50;
+
+            if (!withinBrakingZone && tr._slotTotal > 1 && tr._roundTripTime > 0) {
+                // Find the train immediately AHEAD of us on this line
+                // "Ahead" = the train with the closest _journeyTime that is greater than ours
+                // (wrapping around the round trip cycle).
+                let myTime = tr._journeyTime || 0;
+                let targetGap = tr._roundTripTime / tr._slotTotal; // ideal gap between trains
+
+                let minGapAhead = Infinity;
+                window.trains.forEach(other => {
+                    if (other.id === tr.id || other.lineId !== tr.lineId || other.returningToDepot) return;
+                    let otherTime = other._journeyTime || 0;
+                    // Gap from us to train ahead (modular arithmetic)
+                    let gap = ((otherTime - myTime) % tr._roundTripTime + tr._roundTripTime) % tr._roundTripTime;
+                    if (gap > 0 && gap < minGapAhead) minGapAhead = gap;
+                });
+
+                if (minGapAhead < Infinity) {
+                    // How much are we closing in? (gap < targetGap means we're too close)
+                    let excessCloseness = targetGap - minGapAhead; // positive = we're too close
+                    if (excessCloseness > 0 && targetGap > 0) {
+                        let aheadFraction = Math.min(excessCloseness / targetGap, 1.0);
+                        const REGULATION_STRENGTH = 0.55;
+                        const MIN_FACTOR = 0.35;
+                        let factor = 1.0 - aheadFraction * REGULATION_STRENGTH;
+                        factor = Math.max(factor, MIN_FACTOR);
+                        speedCap *= factor;
+                    }
+                }
+            }
+
+            // ---------------------------------------------------------------
             // LOOK-AHEAD SPEED LIMIT ENFORCEMENT
             //
             // For each upcoming segment with a lower speed limit, compute the
@@ -1637,39 +2144,36 @@ window.updateSim = function (dt) {
             // to a stop exactly at the platform using physics alone.
             // ---------------------------------------------------------------
 
-            let needsStopBraking = distToStop !== Infinity && distToStop >= 0;
+            // distToStop > 0: still approaching; < 0: overshot; Inf: no stop yet
+            let hasStop = distToStop !== Infinity;
 
-            // Ideal speed on the braking curve at this distance to stop
-            let idealStopSpeed = needsStopBraking
+            // Ideal speed on the braking curve at current distance.
+            // Overshot (negative distToStop) => ideal = 0, train must stop then reverse.
+            let idealStopSpeed = hasStop
                 ? Math.sqrt(2 * tr.brake * Math.max(distToStop, 0))
                 : Infinity;
 
-            // Effective speed target: lower of speedCap and ideal stop curve
+            // Effective speed target: lower of track speed cap and braking curve
             let effectiveTarget = Math.min(speedCap, idealStopSpeed);
 
-            // Required decel to stop from current speed over remaining dist
-            let requiredDecel = needsStopBraking && distToStop > 0.01
+            // Required decel to reach stop from current speed
+            let requiredDecel = hasStop && distToStop > 0.1
                 ? (tr.speed * tr.speed) / (2 * Math.max(distToStop, 0.1))
                 : 0;
 
-            // Decide braking state based on whether we need to decelerate for stop
+            // Decide braking state
             let brakeTriggerThreshold = tr.brake * 0.85;
-            if (needsStopBraking && distToStop >= 0 && requiredDecel >= brakeTriggerThreshold) {
+            if (hasStop && distToStop >= 0 && requiredDecel >= brakeTriggerThreshold) {
                 tr.state = 'BRAKING';
             } else if (tr.state === 'BRAKING' && distToStop > brakingDist(tr.speed, tr.brake) + 15) {
                 tr.state = 'DRIVING';
             }
 
-            // --- UNIFIED SPEED CONTROL ---
-            // Both DRIVING and BRAKING use the same physics-based control.
-            // The train accelerates toward effectiveTarget, decelerates away from it.
+            // --- UNIFIED SPEED CONTROL (no snapping, no force-stops) ---
             if (tr.speed < effectiveTarget - 0.05) {
-                // Accelerate toward target (speed limit or braking curve)
                 tr.speed += tr.accel * dtSec;
                 if (tr.speed > effectiveTarget) tr.speed = effectiveTarget;
             } else if (tr.speed > effectiveTarget + 0.05) {
-                // Decelerate toward target
-                // Compute demanded decel: kinematic requirement + correction term
                 let velError = tr.speed - effectiveTarget;
                 let demandedDecel = requiredDecel + velError * 1.5;
                 demandedDecel = Math.min(demandedDecel, tr.ebrake);
@@ -1677,13 +2181,7 @@ window.updateSim = function (dt) {
                 tr.speed -= demandedDecel * dtSec;
                 if (tr.speed < 0) tr.speed = 0;
             } else {
-                // On target — hold it
                 tr.speed = Math.max(0, effectiveTarget);
-            }
-
-            // Hard stop at platform: once very close, let the position cap handle it
-            if (needsStopBraking && distToStop <= 0.1) {
-                tr.speed = 0;
             }
 
             // --- COLLISION AVOIDANCE ---
@@ -1710,53 +2208,115 @@ window.updateSim = function (dt) {
                 if (tr.speed < 0) tr.speed = 0;
             }
 
-            // --- ADVANCE POSITION ---
-            // Cap movement so the head never skips past the stop point in a single
-            // high-dtSec tick (low-end device + high time speed).  Without this cap
-            // the train flies past the platform, distToStop goes negative, the
-            // arrived-check never fires, and the train stalls at the platform exit node.
-            let rawStep = tr.speed * dtSec;
-            if (distToStop !== Infinity && distToStop > 0 && rawStep > distToStop) {
-                rawStep = distToStop; // never overshoot the stop point
-            }
-            tr.headDist += rawStep;
+            // --- ADVANCE POSITION (no cap — physics handles overshoot) ---
+            tr.headDist += tr.speed * dtSec;
 
             // --- MEMORY CLEANUP ---
             while (tr.history.length > 1 && tr.headDist - tr.trainLength > tr.history[0].endDist) {
                 tr.history.shift();
             }
 
-            // --- ARRIVED CHECK ---
-            // The train arrives when it has physically stopped at/past the stop point.
-            // No position snapping during approach — physics handles the stop naturally.
-            // A small final position correction is applied only at the moment of arrival.
+            // --- ARRIVED / OVERSHOT CHECK ---
+            // No position teleport. Dwell when stopped within ±1 m of stop point.
+            // If overshot by more than 1 m, switch to REVERSING_TO_STOP.
             if (targetStation) {
                 let stopHd = window.getPlatformStopHeadDist(tr, targetStation, tr.history);
-                if (stopHd !== null) {
-                    let arrived = tr.headDist >= stopHd - 0.5 && tr.speed < 0.05;
-                    // Also catch large-dtSec overshoot (high time-multiplier)
-                    let overshot = tr.headDist >= stopHd + 0.5;
-                    if (arrived || overshot) {
+                if (stopHd !== null && tr.speed < 0.05) {
+                    let err = tr.headDist - stopHd; // positive = overshot
+                    if (Math.abs(err) <= 1.0) {
                         let platSegs = tr.history.filter(h => h.track && targetStation.trackIds.includes(h.track.id.toString()));
                         if (platSegs.length > 0) {
-                            tr.headDist = stopHd; // tiny final correction only
                             tr.speed = 0;
                             tr.state = 'DWELLING';
                             tr.dwellTimer = targetStation.dwell || 30;
                             tr.nextStationIdx++;
                         }
+                    } else if (err > 1.0) {
+                        // Overshot — reverse back to stop point
+                        tr._reverseToStop = { stopHd, targetStation };
+                        tr.state = 'REVERSING_TO_STOP';
+                    }
+                    // Stopped short outside tolerance: braking curve re-accelerates next tick
+                }
+            }
+
+        } else if (tr.state === 'REVERSING_TO_STOP') {
+            // Train overshot the platform stop point by > 1 m.
+            // Reverse at low speed until within 1 m, then dwell.
+            let rv = tr._reverseToStop;
+            if (!rv) { tr.state = 'DRIVING'; }
+            else {
+                let stopHd = window.getPlatformStopHeadDist(tr, rv.targetStation, tr.history);
+                if (stopHd === null) { tr.state = 'DRIVING'; }
+                else {
+                    let err = tr.headDist - stopHd; // positive = still overshot
+                    if (err <= 1.0) {
+                        // Close enough — accept position as-is and dwell
+                        tr._reverseToStop = null;
+                        tr.speed = 0;
+                        tr.state = 'DWELLING';
+                        tr.dwellTimer = rv.targetStation.dwell || 30;
+                        tr.nextStationIdx++;
+                    } else {
+                        // Reverse speed: proportional up to a cap (~10 km/h), minimum creep
+                        let reverseSpeed = Math.min(err * 0.5, 3.0); // m/s
+                        reverseSpeed = Math.max(reverseSpeed, 0.3);
+                        // Move backward (decrease headDist)
+                        tr.headDist -= reverseSpeed * dtSec;
+                        tr.speed = 0; // reported speed shown as 0 while reversing
                     }
                 }
             }
 
         } else if (tr.state === 'DWELLING') {
             tr.dwellTimer -= dtSec;
+            // Count dwell time toward journey time for headway regulation
+            if (tr._slotTotal > 1) tr._journeyTime = (tr._journeyTime || 0) + dtSec;
             if (tr.dwellTimer <= 0) {
                 let stations = lObj[tr.dirPhase].stations;
                 if (tr.nextStationIdx >= stations.length) {
                     // ── Reached the terminal station ──────────────────────────
                     if (tr.returningToDepot) {
-                        tr.state = 'DESPAWNING';
+                        // Need to return to depot, but first check if a turnaround is required.
+                        // If the terminal is a turnaround area, reverse first so the train
+                        // faces the right direction. _resumeDepotReturn signals TURNAROUND_REVERSE
+                        // to transition to RETURNING_TO_DEPOT instead of DRIVING.
+                        let _hdSeg = null;
+                        for (let i = tr.history.length - 1; i >= 0; i--) {
+                            if (tr.history[i].startDist <= tr.headDist) { _hdSeg = tr.history[i]; break; }
+                        }
+                        let _lastSeg = _hdSeg || tr.history[tr.history.length - 1];
+                        let _curTids = tr.history
+                            .filter(h => h.track && h.startDist < tr.headDist && h.endDist > tr.headDist - tr.trainLength)
+                            .map(h => h.track.id.toString());
+                        let _inPlaceTA = (window.turnaroundAreas || []).find(a =>
+                            a.trackIds.some(tid => _curTids.includes(String(tid)))
+                        );
+                        if (_inPlaceTA) {
+                            // Sitting on turnaround area -- reverse in place, then go to depot
+                            tr._turnaroundTarget = { areaId: _inPlaceTA.id, trackIds: _inPlaceTA.trackIds, approachPath: [] };
+                            tr._terminalTurnaround = false;
+                            tr._resumeDepotReturn = true;
+                            tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
+                            tr.state = 'TURNAROUND_WAIT';
+                            tr._turnaroundWaitTimer = 5.0 + Math.random() * 3.0;
+                        } else {
+                            // Check for a forward turnaround area to drive into first
+                            let _fwdTA = _lastSeg
+                                ? window.findTurnaroundArea(g, _lastSeg.toNode, _lastSeg.track.id, tr.trainLength)
+                                : null;
+                            if (_fwdTA) {
+                                tr._turnaroundTarget = _fwdTA;
+                                tr._terminalTurnaround = false;
+                                tr._resumeDepotReturn = true;
+                                tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
+                                tr.state = 'TURNAROUND_APPROACH';
+                            } else {
+                                // No turnaround needed -- go straight to depot
+                                tr.state = 'RETURNING_TO_DEPOT';
+                                tr._depotReturnAttempts = 0;
+                            }
+                        }
                     } else {
                         let newDir = tr.dirPhase === 'inbound' ? 'outbound' : 'inbound';
                         let newStations = lObj[newDir].stations;
@@ -1783,7 +2343,14 @@ window.updateSim = function (dt) {
                             // also handle cases where the terminal loop / runround
                             // means the train is already facing the right way.
 
-                            let lastSeg = tr.history[tr.history.length - 1];
+                            // Find the history segment that actually contains the head
+                            // (not the last look-ahead seg, which may be far ahead).
+                            let headContainingSeg = null;
+                            for (let i = tr.history.length - 1; i >= 0; i--) {
+                                let h = tr.history[i];
+                                if (h.startDist <= tr.headDist) { headContainingSeg = h; break; }
+                            }
+                            let lastSeg = headContainingSeg || tr.history[tr.history.length - 1];
                             let newFirstTids = newStations[0].trackIds.map(String);
 
                             // Collect all platform track ids the train is currently on
@@ -2056,7 +2623,14 @@ window.updateSim = function (dt) {
 
             tr.speed = 0;
             tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
-            tr.state = 'DRIVING';
+
+            // If this turnaround was needed while returning to depot, go back to that state.
+            if (tr._resumeDepotReturn) {
+                tr._resumeDepotReturn = false;
+                tr.state = 'RETURNING_TO_DEPOT';
+            } else {
+                tr.state = 'DRIVING';
+            }
 
         } else if (tr.state === 'TURNAROUND_PREP') {
             let ok = window.performTurnaround(tr);
@@ -2094,7 +2668,13 @@ window.updateSim = function (dt) {
             let newDir = tr.dirPhase === 'inbound' ? 'outbound' : 'inbound';
             let newStations = lObj[newDir].stations;
             if (!newStations || newStations.length === 0) {
-                tr.state = 'DESPAWNING'; return;
+                if (tr.returningToDepot) {
+                    tr.state = 'RETURNING_TO_DEPOT';
+                    tr._depotReturnAttempts = 0;
+                } else {
+                    tr.state = 'DESPAWNING';
+                }
+                return;
             }
 
             tr.dirPhase = newDir;
@@ -2108,6 +2688,159 @@ window.updateSim = function (dt) {
             tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
             tr.state = 'DRIVING';
         }
+
+        // Extend train history toward depot tracks.
+        // Like extendTrainHistory but WITHOUT the loop-prevention guard, because a
+        // returning train must re-traverse tracks it already covered going the other way.
+        // Still respects sharp-turn rejection and routes through turnaround areas.
+        // =============================================================================
+        // RETURNING_TO_DEPOT: depot tracks treated exactly like a platform.
+        // Uses extendTrainHistory + computeDistToStop + the same physics as DRIVING.
+        // Despawns instead of dwelling when stopped at the depot stop point.
+        // The train can stop on ANY of the depot's tracks (whichever is reachable first).
+        // =============================================================================
+        if (tr.state === 'RETURNING_TO_DEPOT') {
+            // Find home depot or any depot serving this line
+            let homeDepot = window.depots.find(d => d.id === tr.depotId);
+            if (!homeDepot) homeDepot = window.depots.find(d => !d.line || (lObj && (d.line.includes(lObj.name) || d.line === '')));
+            if (!homeDepot || !homeDepot.tracks || homeDepot.tracks.length === 0) { tr.state = 'DESPAWNING'; return; }
+
+            // Accept any depot track as the stop target — just like a multi-track platform.
+            // Prefer a free (unoccupied) track, fall back to any if all busy.
+            // IMPORTANT: once a depot track is already in history (train committed to it),
+            // never switch target — switching causes computeDistToStop to flip to Infinity
+            // on the tick the track enters history (isDepotTrackOccupied sees the train itself),
+            // which makes effectiveTarget jump to Infinity and the train re-accelerates.
+            let allDepotIds = homeDepot.tracks.map(String);
+            let alreadyCommitted = allDepotIds.filter(tid =>
+                tr.history.some(h => h.track && h.track.id.toString() === tid)
+            );
+            let targetDepotIds;
+            if (alreadyCommitted.length > 0) {
+                targetDepotIds = alreadyCommitted; // locked — don't change mid-approach
+            } else {
+                let freeDepotIds = allDepotIds.filter(tid => {
+                    let t = window.tracks.find(x => x.id.toString() === tid);
+                    return t && !window.isDepotTrackOccupied(t);
+                });
+                targetDepotIds = freeDepotIds.length > 0 ? freeDepotIds : allDepotIds;
+            }
+            let depotStation = { trackIds: targetDepotIds };
+
+            // Extend history toward depot using the depot-specific path extension.
+            // Unlike extendTrainHistory, _extendTowardDepot allows re-traversal of
+            // tracks already in history (returning trains must go back the way they came).
+            _extendTowardDepot(tr, g, depotStation);
+
+            // If _extendTowardDepot found a turnaround area en route, hand off.
+            // _resumeDepotReturn tells TURNAROUND_REVERSE to return here afterward.
+            if (tr._turnaroundTarget && tr.state !== 'TURNAROUND_APPROACH') {
+                tr._pendingNewDir = null;
+                tr._terminalTurnaround = false;
+                tr._resumeDepotReturn = true;
+                tr.state = 'TURNAROUND_APPROACH';
+                return;
+            }
+
+            // --- Physics: same as the DRIVING block ---
+            // computeDistToStop returns Infinity until the head is inside a depot track.
+            // Before entry, scan look-ahead history for the first upcoming depot seg and
+            // compute the kinematic stop point from outside so braking starts in time.
+            let distToDepot = window.computeDistToStop(tr, depotStation, tr.history);
+            if (distToDepot === Infinity) {
+                // Find the first depot seg that's ahead of the current head
+                for (let h of tr.history) {
+                    if (h.startDist <= tr.headDist) continue;
+                    if (!targetDepotIds.includes(h.track.id.toString())) continue;
+                    // Use only this specific depot track's length for the stop estimate
+                    let trackLen = h.track.length;
+                    let stopHd = h.startDist + trackLen / 2 + tr.trainLength / 2;
+                    stopHd = Math.max(h.startDist + 1, Math.min(h.startDist + trackLen, stopHd));
+                    distToDepot = stopHd - tr.headDist;
+                    break;
+                }
+            }
+            let trMaxSpeedMs = tr.maxSpeed / 3.6;
+            let headSeg = null;
+            for (let i = 0; i < tr.history.length; i++) {
+                let h = tr.history[i];
+                let isLast = i === tr.history.length - 1;
+                if (tr.headDist >= h.startDist && (isLast ? tr.headDist <= h.endDist : tr.headDist < h.endDist)) {
+                    headSeg = h; break;
+                }
+            }
+            let speedCap = headSeg && headSeg.track.speedLimit
+                ? Math.min(trMaxSpeedMs, headSeg.track.speedLimit / 3.6)
+                : trMaxSpeedMs;
+
+            // Look-ahead speed limit enforcement
+            for (let h of tr.history) {
+                if (h.startDist <= tr.headDist) continue;
+                let hLim = h.track.speedLimit ? h.track.speedLimit / 3.6 : trMaxSpeedMs;
+                if (hLim >= speedCap) continue;
+                let maxNow = Math.sqrt(hLim * hLim + 2 * tr.brake * (h.startDist - tr.headDist));
+                if (maxNow < speedCap) speedCap = maxNow;
+            }
+
+            // Kinematic braking curve toward depot stop (identical to station approach)
+            let hasStop = distToDepot !== Infinity;
+            let idealStopSpeed = hasStop
+                ? Math.sqrt(2 * tr.brake * Math.max(distToDepot, 0))
+                : Infinity;
+            let effectiveTarget = Math.min(speedCap, idealStopSpeed);
+
+            let requiredDecel = hasStop && distToDepot > 0.1
+                ? (tr.speed * tr.speed) / (2 * Math.max(distToDepot, 0.1)) : 0;
+
+            if (tr.speed < effectiveTarget - 0.05) {
+                tr.speed += tr.accel * dtSec;
+                if (tr.speed > effectiveTarget) tr.speed = effectiveTarget;
+            } else if (tr.speed > effectiveTarget + 0.05) {
+                let decel = Math.min(requiredDecel + (tr.speed - effectiveTarget) * 1.5, tr.ebrake);
+                decel = Math.max(decel, tr.brake * 0.1);
+                tr.speed -= decel * dtSec;
+                if (tr.speed < 0) tr.speed = 0;
+            } else {
+                tr.speed = Math.max(0, effectiveTarget);
+            }
+
+            tr.headDist += tr.speed * dtSec;
+            while (tr.history.length > 1 && tr.headDist - tr.trainLength > tr.history[0].endDist) tr.history.shift();
+
+            // Arrived: stopped within 1 m of the computed depot stop point → despawn
+            if (hasStop && tr.speed < 0.05) {
+                let stopHd = window.getPlatformStopHeadDist(tr, depotStation, tr.history);
+                if (stopHd !== null && Math.abs(tr.headDist - stopHd) <= 1.0) {
+                    tr.speed = 0; tr.state = 'DESPAWNING'; return;
+                }
+            }
+            // Fallback: head physically on a depot track and stopped → despawn
+            if (tr.speed < 0.05) {
+                let onDepot = tr.history.some(h =>
+                    h.track && targetDepotIds.includes(h.track.id.toString()) &&
+                    h.startDist <= tr.headDist && tr.headDist <= h.endDist + 1
+                );
+                if (onDepot) { tr.speed = 0; tr.state = 'DESPAWNING'; return; }
+            }
+
+            // Failsafe: stuck with no path for too long → despawn
+            if (!hasStop && tr.speed < 0.01) {
+                tr._depotReturnAttempts = (tr._depotReturnAttempts || 0) + 1;
+                if (tr._depotReturnAttempts > 600) {
+                    console.warn('[SIM] Train', tr.id, 'cannot reach depot — despawning');
+                    tr.state = 'DESPAWNING'; return;
+                }
+            } else { tr._depotReturnAttempts = 0; }
+
+            if (window.selectedTrain && window.selectedTrain.id === tr.id) {
+                document.getElementById('train-info-speed').innerText = Math.round(tr.speed * 3.6);
+                document.getElementById('train-info-state').innerText = 'RETURNING_TO_DEPOT';
+                document.getElementById('train-info-next').innerText = 'Depot';
+                if (lObj) document.getElementById('train-info-line').innerText = lObj.name;
+            }
+            return;
+        }
+
 
         if (window.selectedTrain && window.selectedTrain.id === tr.id) {
             document.getElementById('train-info-speed').innerText = Math.round(tr.speed * 3.6);

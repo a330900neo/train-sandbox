@@ -615,7 +615,20 @@ function updateSelectionUI() {
             uiSelectionLen.innerText = `Total Length: ${selLen.toFixed(1)}m`;
             uiSelectionLen.classList.remove('hidden');
             continuousPath = getContinuousPath(selectedTracks);
-            if (continuousPath) uiSelectionPlatTools.classList.remove('hidden');
+            if (continuousPath) {
+                uiSelectionPlatTools.classList.remove('hidden');
+                // Populate platform meta fields if a boundary exists for this path
+                let pathId = continuousPath.map(p => p.track.id).sort().join(',');
+                let boundary = window.platformBoundaries.find(b => b.pathId === pathId);
+                let metaPanel = document.getElementById('selection-platform-meta');
+                if (boundary) {
+                    metaPanel.classList.remove('hidden');
+                    document.getElementById('input-plat-number').value = boundary.platformNumber || '';
+                    document.getElementById('input-plat-station').value = boundary.stationName || '';
+                } else {
+                    metaPanel.classList.add('hidden');
+                }
+            }
 
             // Turnaround area status
             let selIds = Array.from(selectedTracks).map(String);
@@ -651,8 +664,22 @@ document.getElementById('input-plat-outline').onchange = (e) => {
     selectedPlatforms.forEach(id => { let p = window.platforms.find(x => x.id === id); if (p) p.outlineColor = e.target.value; });
 };
 
-document.getElementById('btn-plat-left').onclick = () => { if (continuousPath) togglePlatformBoundary(continuousPath, -1); };
-document.getElementById('btn-plat-right').onclick = () => { if (continuousPath) togglePlatformBoundary(continuousPath, 1); };
+document.getElementById('btn-apply-plat-meta').onclick = () => {
+    if (!continuousPath) return;
+    let pathId = continuousPath.map(p => p.track.id).sort().join(',');
+    let platNum = document.getElementById('input-plat-number').value.trim();
+    let statName = document.getElementById('input-plat-station').value.trim();
+    // Apply to ALL boundaries sharing this pathId
+    window.platformBoundaries.forEach(b => {
+        if (b.pathId === pathId) {
+            b.platformNumber = platNum;
+            b.stationName = statName;
+        }
+    });
+};
+
+document.getElementById('btn-plat-left').onclick = () => { if (continuousPath) { togglePlatformBoundary(continuousPath, -1); updateSelectionUI(); } };
+document.getElementById('btn-plat-right').onclick = () => { if (continuousPath) { togglePlatformBoundary(continuousPath, 1); updateSelectionUI(); } };
 document.getElementById('btn-plat-both').onclick = () => {
     if (continuousPath) {
         let pathId = continuousPath.map(p => p.track.id).sort().join(',');
