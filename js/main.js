@@ -769,6 +769,7 @@ function confirmBuild() {
         if (!window.nodes.find(n => dist(n, seg.start) < 0.1)) window.nodes.push({ id: Date.now() + Math.random(), x: seg.start.x, y: seg.start.y, dir: seg.dir1, elev: seg.elevStart });
         if (!window.nodes.find(n => dist(n, seg.end) < 0.1)) window.nodes.push({ id: Date.now() + Math.random(), x: seg.end.x, y: seg.end.y, dir: seg.dir2, elev: seg.elevEnd });
     });
+    if (window._invalidateGraphCache) window._invalidateGraphCache();
     cancelBuild();
 }
 
@@ -875,6 +876,7 @@ document.getElementById('btn-load').onclick = () => {
         });
 
         if (window.refreshLineSelector) window.refreshLineSelector();
+        if (window._invalidateGraphCache) window._invalidateGraphCache();
         alert('Tracks loaded successfully!');
     } else alert('No save file found.');
 };
@@ -901,6 +903,7 @@ document.getElementById('file-import').onchange = (e) => {
             });
 
             if (window.refreshLineSelector) window.refreshLineSelector();
+            if (window._invalidateGraphCache) window._invalidateGraphCache();
             alert('Tracks imported successfully!');
         } catch (err) { alert('Invalid file format. Please upload a valid JSON save file.'); }
     };
@@ -939,8 +942,8 @@ document.getElementById('btn-delete').onclick = () => {
     }
     if (selectedPlatforms.size > 0) window.platforms = window.platforms.filter(p => !selectedPlatforms.has(p.id));
     selectedNodes.clear(); selectedTracks.clear(); selectedPlatforms.clear(); updateSelectionUI();
+    if (window._invalidateGraphCache) window._invalidateGraphCache();
 };
-
 document.getElementById('btn-apply-speed').onclick = () => {
     const val = document.getElementById('input-speed').value; const newSpeed = val ? parseFloat(val) : null;
     selectedTracks.forEach(id => { const t = window.tracks.find(x => x.id === id); if (t) t.speedLimit = newSpeed; });
@@ -1001,11 +1004,25 @@ setupNumberInput('e1', 1); setupNumberInput('e2', 1);
 
 let lastTime = performance.now();
 
+// Per-frame track-point cache: avoids recomputing getTrackPoints()
+// multiple times for the same track within a single render call.
+const _trackPointsCache = new Map();
+const _origGetTrackPoints = getTrackPoints;
+function getCachedTrackPoints(track) {
+    let cached = _trackPointsCache.get(track.id);
+    if (cached) return cached;
+    let pts = _origGetTrackPoints(track);
+    _trackPointsCache.set(track.id, pts);
+    return pts;
+}
+
 // --- RENDERING ---
 function render() {
     let now = performance.now();
     let dt = now - lastTime;
     lastTime = now;
+    // Clear per-frame track-point cache at start of each render
+    _trackPointsCache.clear();
     if (window.updateSim) window.updateSim(dt);
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -1075,10 +1092,10 @@ function render() {
 
         layerTracks.forEach(t => {
             if (t.oneWay && t.oneWay !== 0) {
+                const pts = getCachedTrackPoints(t);
                 const numArrows = Math.max(1, Math.floor(t.length / 20));
                 for (let i = 1; i <= numArrows; i++) {
                     const param = i / (numArrows + 1);
-                    const pts = getTrackPoints(t);
                     const idx = Math.floor(param * (pts.length - 1));
                     const midP = pts[idx];
                     const sMid = worldToScreen(midP.x, midP.y);
@@ -1097,6 +1114,98 @@ function render() {
     }
 
     if (window.drawTrains) window.drawTrains(ctx, camera, worldToScreen);
+
+    // --- SELECTED TRAIN PATH VISUALIZATION ---
+    // Draw the look-ahead history segments (the train's computed path) when a train is selected.
+    if (window.selectedTrain && window.selectedTrain.history && window.selectedTrain.history.length > 0) {
+        let tr = window.selectedTrain;
+        let headDist = tr.headDist;
+
+        // Collect segments ahead of the head
+        let aheadSegs = tr.history.filter(h => h.track && h.endDist > headDist);
+        if (aheadSegs.length > 0) {
+            // Draw a glowing overlay on each ahead segment
+            aheadSegs.forEach((h, idx) => {
+                let seg = h.track;
+                let isFirst = idx === 0;
+                // Determine travel direction through this segment
+                let forward = h.fromNode !== undefined;
+                // Use the track's geometry to draw the path highlight
+                if (seg.type === 'straight') {
+                    let s = worldToScreen(seg.start.x, seg.start.y);
+                    let e = worldToScreen(seg.end.x, seg.end.y);
+                    // If first segment, start from head position
+                    if (isFirst) {
+                        let headPt = window.getPointOnHistory && window.getPointOnHistory(tr.history, headDist);
+                        if (headPt) s = worldToScreen(headPt.x, headPt.y);
+                    }
+                    ctx.save();
+                    ctx.strokeStyle = 'rgba(255, 255, 80, 0.85)';
+                    ctx.lineWidth = Math.max(2, 6 * camera.zoom);
+                    ctx.setLineDash([12 * camera.zoom, 6 * camera.zoom]);
+                    ctx.lineCap = 'round';
+                    ctx.beginPath();
+                    ctx.moveTo(s.x, s.y);
+                    ctx.lineTo(e.x, e.y);
+                    ctx.stroke();
+                    ctx.restore();
+                } else if (seg.type === 'arc') {
+                    let c = worldToScreen(seg.cx, seg.cy);
+                    let rScreen = Math.abs(seg.radius * camera.zoom);
+                    ctx.save();
+                    ctx.strokeStyle = 'rgba(255, 255, 80, 0.85)';
+                    ctx.lineWidth = Math.max(2, 6 * camera.zoom);
+                    ctx.setLineDash([12 * camera.zoom, 6 * camera.zoom]);
+                    ctx.lineCap = 'round';
+                    ctx.beginPath();
+                    ctx.arc(c.x, c.y, rScreen, seg.startAngle, seg.endAngle, !seg.ccw);
+                    ctx.stroke();
+                    ctx.restore();
+                }
+            });
+
+            // Draw direction arrows along the path
+            ctx.save();
+            ctx.fillStyle = 'rgba(255, 220, 0, 0.9)';
+            ctx.setLineDash([]);
+            aheadSegs.forEach(h => {
+                let seg = h.track;
+                let numArrows = Math.max(1, Math.floor(seg.length / 60));
+                for (let i = 1; i <= numArrows; i++) {
+                    let t = i / (numArrows + 1);
+                    let pt = null;
+                    if (seg.type === 'straight') {
+                        let x = seg.start.x + (seg.end.x - seg.start.x) * t;
+                        let y = seg.start.y + (seg.end.y - seg.start.y) * t;
+                        pt = { x, y, dir: seg.dir1 };
+                    } else if (seg.type === 'arc') {
+                        let ang = seg.startAngle + seg.dTheta * t;
+                        pt = { x: seg.cx + Math.cos(ang) * seg.radius, y: seg.cy + Math.sin(ang) * seg.radius, dir: normalizeAngle(ang + (seg.ccw ? Math.PI / 2 : -Math.PI / 2)) };
+                    }
+                    if (!pt) continue;
+                    // Flip direction if traversed backwards
+                    let dir = (h.fromNode !== undefined && h.toNode !== undefined) ? pt.dir : normalizeAngle(pt.dir + Math.PI);
+                    // Determine if forward: fromNode matches track start node
+                    let startNode = window.nodes && window.nodes.find(n => n.id.toString() === h.fromNode.toString());
+                    if (startNode) {
+                        let dStart = Math.hypot(startNode.x - seg.start.x, startNode.y - seg.start.y);
+                        let dEnd = Math.hypot(startNode.x - seg.end.x, startNode.y - seg.end.y);
+                        if (dStart > dEnd) dir = normalizeAngle(pt.dir + Math.PI);
+                        else dir = pt.dir;
+                    }
+                    let sP = worldToScreen(pt.x, pt.y);
+                    let arrowSize = Math.max(6, 10 * camera.zoom);
+                    ctx.beginPath();
+                    ctx.moveTo(sP.x + Math.cos(dir) * arrowSize, sP.y + Math.sin(dir) * arrowSize);
+                    ctx.lineTo(sP.x + Math.cos(dir + 2.5) * arrowSize * 0.6, sP.y + Math.sin(dir + 2.5) * arrowSize * 0.6);
+                    ctx.lineTo(sP.x + Math.cos(dir - 2.5) * arrowSize * 0.6, sP.y + Math.sin(dir - 2.5) * arrowSize * 0.6);
+                    ctx.closePath();
+                    ctx.fill();
+                }
+            });
+            ctx.restore();
+        }
+    }
 
     if (preview.active && Math.min(preview.elevStart, preview.elevEnd) <= maxElevFilter) {
         if (preview.geometry.length > 0) {

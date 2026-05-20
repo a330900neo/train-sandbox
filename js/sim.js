@@ -325,455 +325,7 @@ window.removeSecondary = function (idx) { window.sim.editingLine[window.sim.edit
 window.removeStation = function (idx) { window.sim.editingLine[window.sim.editingDir].stations.splice(idx, 1); window.refreshLineEditor(); };
 
 
-// --- DYNAMIC GRAPH CONSTRUCTION ---
-window.buildGraph = function () {
-    let graph = new Map();
-    if (!window.tracks || !window.nodes) return graph;
 
-    const POS_SNAP = 1.0; // metres — positions within this are same node
-    let posToCanonId = new Map();
-    let snapKey = (x, y) => `${Math.round(x / POS_SNAP)},${Math.round(y / POS_SNAP)}`;
-
-    if (window.nodes) {
-        window.nodes.forEach(n => {
-            let k = snapKey(n.x, n.y);
-            if (!posToCanonId.has(k)) posToCanonId.set(k, n.id);
-        });
-    }
-
-    // Store node positions keyed by ID for geometry fallback in _trackOutwardTangent
-    let nodePositions = new Map();
-    if (window.nodes) window.nodes.forEach(n => nodePositions.set(n.id.toString(), n));
-    window._nodePositions = nodePositions;
-
-    let canonNode = (x, y, fallbackId) => {
-        let k = snapKey(x, y);
-        if (posToCanonId.has(k)) return posToCanonId.get(k);
-        posToCanonId.set(k, fallbackId);
-        return fallbackId;
-    };
-
-    window.tracks.forEach(t => {
-        let sNodeRaw = window.nodes.find(n => Math.hypot(n.x - t.start.x, n.y - t.start.y) < POS_SNAP);
-        let eNodeRaw = window.nodes.find(n => Math.hypot(n.x - t.end.x, n.y - t.end.y) < POS_SNAP);
-        if (!sNodeRaw || !eNodeRaw) return;
-
-        let sId = canonNode(t.start.x, t.start.y, sNodeRaw.id);
-        let eId = canonNode(t.end.x, t.end.y, eNodeRaw.id);
-
-        // Ensure canonical IDs have position entries (handles depot remapped nodes)
-        if (!nodePositions.has(sId.toString())) nodePositions.set(sId.toString(), { x: t.start.x, y: t.start.y, id: sId });
-        if (!nodePositions.has(eId.toString())) nodePositions.set(eId.toString(), { x: t.end.x, y: t.end.y, id: eId });
-
-        if (!graph.has(sId)) graph.set(sId, []);
-        if (!graph.has(eId)) graph.set(eId, []);
-        let spd = t.speedLimit || (t.type === 'arc' ? Math.min(160, 4.5 * Math.sqrt(t.radius)) : 160);
-
-        // Compute departure directions from coordinate geometry (not dir1/dir2 which may be wrong)
-        let sDx = t.end.x - t.start.x, sDy = t.end.y - t.start.y;
-        let baseAngle = Math.atan2(sDy, sDx);
-        let deptFromS, deptFromE;
-
-        if (t.type === 'arc' && t.cx !== undefined && t.cy !== undefined) {
-            let rsX = t.start.x - t.cx, rsY = t.start.y - t.cy;
-            let reX = t.end.x - t.cx, reY = t.end.y - t.cy;
-            let tsX, tsY, teX, teY;
-            if (t.ccw) { tsX = -rsY; tsY = rsX; teX = -reY; teY = reX; }
-            else { tsX = rsY; tsY = -rsX; teX = reY; teY = -reX; }
-            deptFromS = Math.atan2(tsY, tsX);
-            deptFromE = normalizeAngle(Math.atan2(teY, teX) + Math.PI);
-        } else {
-            deptFromS = baseAngle;
-            deptFromE = normalizeAngle(baseAngle + Math.PI);
-        }
-
-        if (t.oneWay !== -1) graph.get(sId).push({ trackId: t.id, to: eId, cost: t.length, speed: spd, departDir: deptFromS });
-        if (t.oneWay !== 1) graph.get(eId).push({ trackId: t.id, to: sId, cost: t.length, speed: spd, departDir: deptFromE });
-    });
-
-    window._cachedGraph = graph;
-    window._canonNodeMap = posToCanonId;
-    return graph;
-};
-
-// Returns the physical tangent departure angle from fromNodeId along trackId.
-window._getEdgeDir = function (trackId, fromNodeId, graphOrNull) {
-    let g = graphOrNull || window._cachedGraph;
-    if (g) {
-        let edges = g.get(fromNodeId) || [];
-        let e = edges.find(ed => ed.trackId === trackId || ed.trackId.toString() === trackId.toString());
-        if (e && e.departDir !== undefined) return e.departDir;
-        // Also try canonicalized fromNodeId
-        if (window._canonNodeMap) {
-            let node = window.nodes && window.nodes.find(n => n.id.toString() === fromNodeId.toString());
-            if (node) {
-                let canonId = window._canonNodeMap.get(`${Math.round(node.x)},${Math.round(node.y)}`);
-                if (canonId && canonId !== fromNodeId) {
-                    let canonEdges = g.get(canonId) || [];
-                    let ce = canonEdges.find(ed => ed.trackId === trackId || ed.trackId.toString() === trackId.toString());
-                    if (ce && ce.departDir !== undefined) return ce.departDir;
-                }
-            }
-        }
-    }
-    let t = window.tracks.find(x => x.id === trackId || x.id.toString() === trackId.toString());
-    if (!t) return null;
-    let dir2 = (t.dir2 !== undefined) ? t.dir2 : t.dir1;
-    let sNode = window.nodes.find(n => Math.hypot(n.x - t.start.x, n.y - t.start.y) < 1.0);
-    if (sNode && sNode.id.toString() === fromNodeId.toString()) return t.dir1;
-    return normalizeAngle(dir2 + Math.PI);
-};
-
-// =============================================================================
-// GEOMETRY-BASED TURN DETECTION
-//
-// Forget angle-bookkeeping through the graph. Instead:
-//   At a node, each connected track has a PHYSICAL tangent direction pointing
-//   AWAY from the node (outward tangent).
-//   Tracks on "opposite sides" of a node (tangents ~180° apart) are through-routes.
-//   Tracks on the "same side" (tangents < 90° apart) are sharp turns / U-turns.
-//
-// Algorithm:
-//   1. Get outward tangent of incoming track at node (= arrivalDir reversed, i.e. the
-//      direction the track continues AWAY from the node back toward where the train came from).
-//   2. Get outward tangent of candidate track at node (= departDir, pointing away from node).
-//   3. Angle between them: ~180° = straight through (good). ~0° = U-turn (bad). ~90° = junction.
-//
-// This works regardless of which direction the track was placed by the player,
-// because we always use the physical geometry at the node.
-// =============================================================================
-const SHARP_ANGLE_THRESHOLD = Math.PI * 2 / 3;  // 120°
-const UTURN_THRESHOLD = Math.PI * 5 / 6;  // 150°
-
-// =============================================================================
-// PURE COORDINATE TANGENT — never uses dir1/dir2 (unreliable, may be flipped)
-//
-// For STRAIGHT tracks: tangent at start = atan2(end-start), tangent at end = reverse.
-// For ARC tracks: tangent = perpendicular to radius at that endpoint.
-//   Arc center is track.cx, track.cy. CCW arcs rotate tangent +90°, CW -90°.
-//
-// "Outward" = pointing AWAY from the node into the track body.
-// If the node is at the START of the track, the outward tangent = toward END.
-// If at END, outward tangent = toward START.
-// =============================================================================
-function _trackOutwardTangentAtPos(track, nodePos) {
-    const SNAP = 2.0;
-    let dStart = Math.hypot(track.start.x - nodePos.x, track.start.y - nodePos.y);
-    let dEnd = Math.hypot(track.end.x - nodePos.x, track.end.y - nodePos.y);
-    let atStart = dStart <= dEnd;
-
-    if (track.type === 'arc' && track.cx !== undefined && track.cy !== undefined) {
-        // Tangent at a point P on circle center C:
-        //   radius = P - C
-        //   CCW tangent = rotate radius +90° → (-ry, rx)
-        //   CW  tangent = rotate radius -90° → (ry, -rx)
-        // This gives the direction of travel in the arc's winding direction (start→end).
-        let px = atStart ? track.start.x : track.end.x;
-        let py = atStart ? track.start.y : track.end.y;
-        let rx = px - track.cx;
-        let ry = py - track.cy;
-        let tx, ty;
-        if (track.ccw) { tx = -ry; ty = rx; }
-        else { tx = ry; ty = -rx; }
-        let forwardAngle = Math.atan2(ty, tx); // direction start→end at this endpoint
-        // If at start: outward = forwardAngle (leaving node toward end)
-        // If at end:   outward = reverse (leaving node back toward start)
-        return atStart ? forwardAngle : normalizeAngle(forwardAngle + Math.PI);
-    }
-
-    // Straight (or arc without center): use endpoint coordinates
-    let dx = track.end.x - track.start.x;
-    let dy = track.end.y - track.start.y;
-    let baseAngle = Math.atan2(dy, dx); // direction start→end
-    return atStart ? baseAngle : normalizeAngle(baseAngle + Math.PI);
-}
-
-// Get node position as {x,y} from any nodeId, using _nodePositions map or nodes array.
-function _nodePos(nodeId) {
-    if (window._nodePositions) {
-        let n = window._nodePositions.get(nodeId.toString());
-        if (n) return n;
-    }
-    if (window.nodes) {
-        let n = window.nodes.find(n => n.id.toString() === nodeId.toString());
-        if (n) return n;
-    }
-    return null;
-}
-
-// Core turn angle using purely geometric outward tangents.
-// incomingTrackId: track the train just came FROM (we arrived along this)
-// candidateTrackId: track we're considering going TO
-// nodeId: the junction node
-//
-// Method:
-//   Both tracks connect at nodeId. Each track has an outward tangent at that node
-//   (pointing AWAY from the node into the track body).
-//   If the two outward tangents are ~180° apart → tracks go in opposite directions
-//     → straight through → deviation ≈ 0 (allowed).
-//   If the two outward tangents are ~0° apart → both leave the node in same direction
-//     → U-turn (train would reverse) → deviation ≈ 180° (blocked).
-//
-// Special case: same track → always U-turn regardless of tangent.
-function _getTurnAngle(incomingTrackId, candidateTrackId, nodeId, graph) {
-    // Same track = always a U-turn
-    if (incomingTrackId.toString() === candidateTrackId.toString()) return Math.PI;
-
-    let inTrack = window.tracks && window.tracks.find(t => t.id === incomingTrackId || t.id.toString() === incomingTrackId.toString());
-    let outTrack = window.tracks && window.tracks.find(t => t.id === candidateTrackId || t.id.toString() === candidateTrackId.toString());
-    if (!inTrack || !outTrack) return 0;
-
-    let pos = _nodePos(nodeId);
-    if (!pos) {
-        // Can't resolve node position — fall back to permissive (allow)
-        return 0;
-    }
-
-    let inOutward = _trackOutwardTangentAtPos(inTrack, pos);
-    let outOutward = _trackOutwardTangentAtPos(outTrack, pos);
-
-    // Angle between outward tangents (0–PI)
-    let between = Math.abs(normalizeAngle(outOutward - inOutward));
-
-    // deviation: 0 = straight through, PI = U-turn
-    return Math.abs(Math.PI - between);
-}
-
-function _isUTurn(incomingId, candidateId, nodeId, graph) {
-    return _getTurnAngle(incomingId, candidateId, nodeId, graph) > UTURN_THRESHOLD;
-}
-
-function _isSharpTurn(incomingId, candidateId, nodeId, graph) {
-    return _getTurnAngle(incomingId, candidateId, nodeId, graph) > SHARP_ANGLE_THRESHOLD;
-}
-
-// =============================================================================
-// TURNAROUND AREA FINDER (player-defined areas only)
-//
-// A turnaround area is a set of track IDs defined by the player (via selection
-// tool). Trains that cannot find a forward path will approach the nearest
-// reachable turnaround area, stop fully (like a platform), then reverse.
-//
-// Returns: { areaId, entryNodeId, entryTrackId, stopTrackIds } describing
-//   which area to use and how to approach it. null if none reachable.
-// =============================================================================
-window.findTurnaroundArea = function (graph, startNodeId, incomingTrackId, trainLength) {
-    let areas = window.turnaroundAreas || [];
-    if (areas.length === 0) return null;
-
-    // Dijkstra from startNodeId to find the nearest reachable turnaround area
-    // without sharp-turn restriction (train needs to get there somehow).
-    let distMap = new Map();
-    let prev = new Map();
-    let stateKey = (nid, tid) => String(nid) + '|' + String(tid || '');
-    let startSk = stateKey(startNodeId, incomingTrackId || null);
-    let pq = [{ id: startNodeId, cost: 0, lastTrack: incomingTrackId || null, sk: startSk }];
-    distMap.set(startSk, 0);
-
-    let bestArea = null, bestCost = Infinity, bestSk = null;
-
-    while (pq.length > 0) {
-        pq.sort((a, b) => a.cost - b.cost);
-        let u = pq.shift();
-        if ((distMap.get(u.sk) || Infinity) < u.cost) continue;
-        if (u.cost > 5000) break; // don't search too far
-
-        // Check if current node has an edge into a turnaround area
-        let edges = graph.get(u.id) || [];
-        for (let edge of edges) {
-            let edgeTidStr = String(edge.trackId);
-            if (u.lastTrack && String(u.lastTrack) === edgeTidStr) continue; // same track U-turn
-
-            let edgeIsAreaTrack = areas.some(a => a.trackIds.includes(edgeTidStr));
-
-            // Allow sharp turns INTO turnaround area tracks: the player deliberately
-            // placed a stub/loop there, so approach angle doesn't matter.
-            // For non-area tracks (approach path), still reject sharp turns so the
-            // train doesn't take a wild detour to reach the area.
-            if (u.lastTrack && !edgeIsAreaTrack) {
-                let angle = _getTurnAngle(u.lastTrack, edge.trackId, u.id, graph);
-                if (angle > SHARP_ANGLE_THRESHOLD) continue;
-            }
-
-            let alt = u.cost + edge.cost;
-            let nextSk = stateKey(edge.to, edge.trackId);
-            if (!distMap.has(nextSk) || alt < distMap.get(nextSk)) {
-                distMap.set(nextSk, alt);
-                prev.set(nextSk, { fromNode: u.id, fromTrack: u.lastTrack, edge });
-                pq.push({ id: edge.to, cost: alt, lastTrack: edge.trackId, sk: nextSk });
-            }
-
-            // Does this edge's track belong to a turnaround area?
-            for (let area of areas) {
-                if (area.trackIds.includes(edgeTidStr)) {
-                    if (alt < bestCost) {
-                        bestCost = alt;
-                        bestArea = area;
-                        bestSk = nextSk;
-                    }
-                }
-            }
-        }
-    }
-
-    if (!bestArea) return null;
-
-    // Reconstruct approach path up to the turnaround area entry
-    let path = [];
-    let cur = bestSk;
-    let visited = new Set([cur]);
-    let safety = 0;
-    while (prev.has(cur) && safety++ < 500) {
-        let p = prev.get(cur);
-        path.unshift({ trackId: p.edge.trackId, fromNode: p.fromNode, toNode: p.edge.to, cost: p.edge.cost });
-        let nextCur = stateKey(p.fromNode, p.fromTrack);
-        if (visited.has(nextCur)) break;
-        visited.add(nextCur);
-        cur = nextCur;
-    }
-
-    return {
-        areaId: bestArea.id,
-        trackIds: bestArea.trackIds,
-        approachPath: path
-    };
-};
-
-// =============================================================================
-// FULL PATH PRECOMPUTATION
-// Returns an ordered array of {trackId, fromNode, toNode, speed, cost} steps
-// from startNodeId to any track in targetTrackIds.
-//
-// allowSharpTurns=false  → reject sharp angle turns AND U-turns (normal travel)
-// allowSharpTurns=true   → allow all turns (used after turnaround)
-//
-// If no path found with sharp-turn rejection, returns null (caller tries turnaround).
-// =============================================================================
-window.computeFullPath = function (graph, startNodeId, targetTrackIds, incomingTrackId, allowSharpTurns) {
-    let tIds = Array.isArray(targetTrackIds) ? targetTrackIds.map(String) : [targetTrackIds.toString()];
-    if (allowSharpTurns === undefined) allowSharpTurns = false;
-
-    // State key: (nodeId, lastTrackId) — Dijkstra explores per-state so turn
-    // angles are correctly evaluated at every hop.
-    let distMap = new Map();
-    let prev = new Map();
-    let stateKey = (nid, tid) => String(nid) + '|' + String(tid || '');
-    let startSk = stateKey(startNodeId, incomingTrackId || null);
-    let pq = [{ id: startNodeId, cost: 0, lastTrack: incomingTrackId || null, sk: startSk, tracksUsed: new Set(incomingTrackId ? [String(incomingTrackId)] : []) }];
-    distMap.set(startSk, 0);
-
-    let foundTargetEdge = null;
-    let foundAtNode = null;
-    let foundLastTrack = null;
-    let foundTracksUsed = null;
-
-    while (pq.length > 0) {
-        pq.sort((a, b) => a.cost - b.cost);
-        let u = pq.shift();
-        if ((distMap.get(u.sk) || Infinity) < u.cost) continue; // stale
-
-        let edges = graph.get(u.id) || [];
-        for (let edge of edges) {
-            let edgeTidStr = String(edge.trackId);
-
-            // Never reverse onto the track we just came from (U-turn on same track)
-            if (u.lastTrack && String(u.lastTrack) === edgeTidStr) continue;
-
-            // Never revisit a track already used in this path (prevents loops/zigzags)
-            if (u.tracksUsed.has(edgeTidStr)) continue;
-
-            // Reject sharp turns unless caller opts out
-            if (!allowSharpTurns && u.lastTrack) {
-                let angle = _getTurnAngle(u.lastTrack, edge.trackId, u.id, graph);
-                if (angle > SHARP_ANGLE_THRESHOLD) continue;
-            }
-
-            let alt = u.cost + edge.cost;
-            let nextSk = stateKey(edge.to, edge.trackId);
-            if (!distMap.has(nextSk) || alt < distMap.get(nextSk)) {
-                distMap.set(nextSk, alt);
-                let newTracksUsed = new Set(u.tracksUsed);
-                newTracksUsed.add(edgeTidStr);
-                prev.set(nextSk, { fromNode: u.id, fromTrack: u.lastTrack, fromSk: u.sk, edge });
-                pq.push({ id: edge.to, cost: alt, lastTrack: edge.trackId, sk: nextSk, tracksUsed: newTracksUsed });
-            }
-
-            if (tIds.includes(edgeTidStr)) {
-                if (foundTargetEdge === null || alt < (foundTargetEdge._cost || Infinity)) {
-                    foundTargetEdge = { ...edge, _cost: alt };
-                    foundAtNode = u.id;
-                    foundLastTrack = u.lastTrack;
-                }
-            }
-        }
-    }
-
-    if (!foundTargetEdge) return null;
-
-    // Reconstruct path by backtracking through prev map
-    let path = [];
-    let cur = stateKey(foundAtNode, foundLastTrack);
-    let curNode = foundAtNode;
-    let visited = new Set([cur]);
-    let safety = 0;
-    while (curNode !== startNodeId && prev.has(cur) && safety++ < 500) {
-        let p = prev.get(cur);
-        path.unshift({ trackId: p.edge.trackId, fromNode: p.fromNode, toNode: curNode, speed: p.edge.speed, cost: p.edge.cost });
-        curNode = p.fromNode;
-        let nextCur = stateKey(p.fromNode, p.fromTrack);
-        if (visited.has(nextCur)) break; // cycle guard
-        visited.add(nextCur);
-        cur = nextCur;
-    }
-    path.push({ trackId: foundTargetEdge.trackId, fromNode: foundAtNode, toNode: foundTargetEdge.to, speed: foundTargetEdge.speed, cost: foundTargetEdge.cost });
-
-    return path.length > 0 ? path : null;
-};
-
-// =============================================================================
-// SHARP-TURN-AWARE PATH: try strict (no sharp turns), return null if impossible.
-// Callers that get null should trigger a turnaround, NOT silently allow sharp turns.
-// =============================================================================
-window.computePathStrict = function (graph, startNodeId, targetTrackIds, incomingTrackId) {
-    let strict = window.computeFullPath(graph, startNodeId, targetTrackIds, incomingTrackId, false);
-    if (strict) return { path: strict, forcedSharpTurn: false };
-    let loose = window.computeFullPath(graph, startNodeId, targetTrackIds, incomingTrackId, true);
-    if (loose) return { path: loose, forcedSharpTurn: true };
-    return null;
-};
-
-
-window.findNextTrack = function (graph, startNodeId, targetTrackIds, incomingTrackId, allowSharpTurns) {
-    if (allowSharpTurns) {
-        // Caller (e.g. just-spawned train or post-turnaround) explicitly allows any route.
-        let path = window.computeFullPath(graph, startNodeId, targetTrackIds, incomingTrackId, true);
-        if (!path || path.length === 0) {
-            console.warn(`[PATHFIND] No path at all from node ${startNodeId} (incoming: ${incomingTrackId}) to targets: ${JSON.stringify(targetTrackIds)}`);
-            return null;
-        }
-        let first = path[0];
-        let edges = graph.get(startNodeId) || [];
-        return edges.find(e => e.trackId === first.trackId && e.to === first.toNode)
-            || { trackId: first.trackId, to: first.toNode, cost: first.cost, speed: first.speed };
-    }
-
-    let result = window.computePathStrict(graph, startNodeId, targetTrackIds, incomingTrackId);
-    if (!result || !result.path || result.path.length === 0) {
-        if (!result) {
-            console.warn(`[PATHFIND] No path at all from node ${startNodeId} (incoming: ${incomingTrackId}) to targets: ${JSON.stringify(targetTrackIds)}`);
-        }
-        return null;
-    }
-    if (result.forcedSharpTurn) {
-        // Path only reachable via a sharp turn — return null so caller triggers turnaround.
-        console.warn(`[PATHFIND] Path requires sharp turn from node ${startNodeId} (incoming: ${incomingTrackId}) — returning null to trigger turnaround`);
-        return null;
-    }
-    let first = result.path[0];
-    let edges = graph.get(startNodeId) || [];
-    return edges.find(e => e.trackId === first.trackId && e.to === first.toNode)
-        || { trackId: first.trackId, to: first.toNode, cost: first.cost, speed: first.speed };
-};
 
 // =============================================================================
 // PHYSICS-ACCURATE GHOST TRAIN SIMULATION
@@ -1020,38 +572,43 @@ window.getPointOnHistory = function (history, distFromTail) {
     if (!history || history.length === 0) return null;
 
     let seg = null;
-
-    // Walk segments in order; pick the first one whose half-open interval
-    // [startDist, endDist) contains distFromTail.  The very last segment uses
-    // a closed interval [startDist, endDist] so the head itself is always valid.
     for (let i = 0; i < history.length; i++) {
         let h = history[i];
         let isLast = (i === history.length - 1);
         if (distFromTail >= h.startDist && (isLast ? distFromTail <= h.endDist : distFromTail < h.endDist)) {
-            seg = h;
-            break;
+            seg = h; break;
         }
     }
-
-    // Fallback for positions outside the history range
     if (!seg) {
         seg = distFromTail < history[0].startDist ? history[0] : history[history.length - 1];
     }
-
     if (!seg || !seg.track) return null;
 
-    // localDist must be clamped to [0, track.length] so tParam stays in [0,1]
     let localDist = Math.max(0, Math.min(seg.track.length, distFromTail - seg.startDist));
 
-    let tStartNodeId = window.nodes.find(
-        n => Math.hypot(n.x - seg.track.start.x, n.y - seg.track.start.y) < 0.1
-    )?.id;
-    let isForward = (seg.fromNode === tStartNodeId);
+    // Determine direction using fromNode stored in history, matched against the track's
+    // physical start endpoint via the nodePositions map (built every graph rebuild).
+    // Use 2m tolerance (same as POS_SNAP) to handle floating-point drift.
+    let isForward = true; // safe default
+    if (seg.fromNode !== undefined && seg.track.start) {
+        let fromPos = (window._nodePositions && window._nodePositions.get(String(seg.fromNode)))
+            || (window.nodes && window.nodes.find(n => n.id.toString() === String(seg.fromNode)));
+        if (fromPos) {
+            let dFromStart = Math.hypot(fromPos.x - seg.track.start.x, fromPos.y - seg.track.start.y);
+            let dFromEnd = Math.hypot(fromPos.x - seg.track.end.x, fromPos.y - seg.track.end.y);
+            isForward = dFromStart <= dFromEnd;
+        } else {
+            // fromNode not in nodePositions — scan window.nodes with 2m snap
+            let found = window.nodes && window.nodes.find(
+                n => Math.hypot(n.x - seg.track.start.x, n.y - seg.track.start.y) < 2.0
+            );
+            if (found) isForward = (String(seg.fromNode) === String(found.id));
+        }
+    }
 
     let tParam = isForward
         ? (localDist / seg.track.length)
         : (1 - localDist / seg.track.length);
-
     tParam = Math.max(0, Math.min(1, tParam));
     return window.getExactTrackPointAndDir(seg.track, tParam, isForward);
 };
@@ -1186,106 +743,6 @@ window.isDepotTrackOccupied = function (depTrack) {
     });
 };
 
-// =============================================================================
-// IMPROVED SPAWN: Pathfind first, pick the correct depot track + direction.
-// Depot tracks are bidirectional — try both traversal directions.
-// Skip occupied depot tracks so multiple trains don't pile on the same track.
-// =============================================================================
-window.spawnTrainOnLine = function (line, dir, depot) {
-    let g = window.buildGraph();
-    let depotTrackIds = new Set((depot.tracks || []).map(String));
-    let st = line[dir].stations;
-    if (!st || st.length === 0) return null;
-    let firstStationTrackIds = st[0].trackIds;
-
-    // Build a lookup: depotTrackId -> [{fromNode, toNode, departDir}] from the graph.
-    // Depot tracks are NOT one-way so we include both traversal directions.
-    let depotEdgeMap = new Map(); // trackId -> array of {fromNode, toNode, departDir}
-    for (let [nid, edges] of g) {
-        for (let e of edges) {
-            if (!depotTrackIds.has(e.trackId.toString())) continue;
-            if (!depotEdgeMap.has(e.trackId)) depotEdgeMap.set(e.trackId, []);
-            depotEdgeMap.get(e.trackId).push({ fromNode: nid, toNode: e.to, departDir: e.departDir });
-        }
-    }
-
-    let bestDepTrack = null, bestFromNode = null, bestToNode = null;
-    let bestPathLen = Infinity;
-
-    for (let depTrackId of (depot.tracks || [])) {
-        let candidate = window.tracks.find(t => t.id === depTrackId);
-        if (!candidate) continue;
-
-        // Skip if this depot track is currently occupied by another train
-        if (window.isDepotTrackOccupied(candidate)) continue;
-
-        let traversals = depotEdgeMap.get(depTrackId) || depotEdgeMap.get(depTrackId.toString()) || [];
-
-        for (let { fromNode, toNode } of traversals) {
-            // toNode is the exit end — must have external edges
-            let externalEdges = (g.get(toNode) || []).filter(e => !depotTrackIds.has(e.trackId.toString()));
-            if (externalEdges.length === 0) continue;
-
-            // Pathfind from exit node WITHOUT angle restriction for first step
-            // (train starts from rest, direction is determined by spawn orientation)
-            let path = window.computeFullPath(g, toNode, firstStationTrackIds, null, false);
-            if (!path) path = window.computeFullPath(g, toNode, firstStationTrackIds, null, true);
-            if (!path) continue;
-
-            let pathLen = path.reduce((s, p) => s + p.cost, 0) + candidate.length;
-            if (pathLen < bestPathLen) {
-                bestPathLen = pathLen;
-                bestDepTrack = candidate;
-                bestFromNode = fromNode;
-                bestToNode = toNode;
-            }
-        }
-    }
-
-    // Fallback: any non-occupied depot track whose toNode has any external connection
-    if (!bestDepTrack) {
-        outer: for (let depTrackId of (depot.tracks || [])) {
-            let candidate = window.tracks.find(t => t.id === depTrackId);
-            if (!candidate) continue;
-            if (window.isDepotTrackOccupied(candidate)) continue;
-            let traversals = depotEdgeMap.get(depTrackId) || depotEdgeMap.get(depTrackId.toString()) || [];
-            for (let { fromNode, toNode } of traversals) {
-                let ext = (g.get(toNode) || []).filter(e => !depotTrackIds.has(e.trackId.toString()));
-                if (ext.length > 0) {
-                    bestDepTrack = candidate; bestFromNode = fromNode; bestToNode = toNode;
-                    break outer;
-                }
-            }
-        }
-    }
-
-    if (!bestDepTrack) return null;
-
-    let tLen = (depot.carriages || 4) * 25 + Math.max(0, (depot.carriages || 4) - 1);
-    // Place head inside depot track (not past end), so extendTrainHistory works on tick 1
-    let initialHeadDist = Math.min(tLen, bestDepTrack.length);
-
-    let newTrain = {
-        id: 'TRN' + Math.floor(Math.random() * 100000),
-        lineId: line.id, dirPhase: dir,
-        depotId: depot.id, // remember home depot for return trip
-        carriages: depot.carriages || 4, trainLength: tLen,
-        color: depot.color || '#ff8800', maxSpeed: depot.maxSpeed || 60,
-        accel: depot.accel || 1.0, brake: depot.brake || 1.0, ebrake: depot.ebrake || 2.0,
-        speed: 0, state: 'DRIVING',
-        nextStationIdx: 0, dwellTimer: 0,
-        returningToDepot: false,
-        plannedRoute: [],
-        _justSpawned: true, // suppress angle check on first extendTrainHistory call
-        history: [{
-            track: bestDepTrack, fromNode: bestFromNode, toNode: bestToNode,
-            startDist: 0, endDist: bestDepTrack.length
-        }],
-        headDist: initialHeadDist
-    };
-    return newTrain;
-};
-
 // Advance a train's position forward along its route for even spreading
 window.advanceTrainPosition = function (train, line, dir, g, targetDist) {
     let st = line[dir].stations;
@@ -1355,303 +812,6 @@ window.estimateLineTripDistance = function (line, dir) {
 // When no forward path exists, sets train._turnaroundTarget if a player-defined
 // turnaround area is reachable.
 // =============================================================================
-const ROUTE_LOOKAHEAD = 800; // meters of track to pre-load into history
-
-window.extendTrainHistory = function (train, g, targetStation) {
-    if (!targetStation) return;
-
-    // If we're already committed to approaching a turnaround, extend history
-    // toward the turnaround area (treat its tracks like a platform).
-    if (train._turnaroundTarget) {
-        _extendTowardTurnaround(train, g);
-        return;
-    }
-
-    let sanity = 0;
-    let platIds = targetStation.trackIds.map(String);
-
-    while (sanity++ < 200) {
-        let lastSeg = train.history[train.history.length - 1];
-        if (!lastSeg || !lastSeg.track) break;
-
-        let lastId = lastSeg.track.id.toString();
-        let lastIsOnPlat = platIds.includes(lastId);
-
-        if (lastIsOnPlat) {
-            let platInHistory = new Set(
-                train.history.filter(h => h.track && platIds.includes(h.track.id.toString()))
-                    .map(h => h.track.id.toString())
-            );
-            if (platInHistory.size >= platIds.length) break;
-
-            let nextPlatStep = window.findNextTrack(g, lastSeg.toNode, platIds, lastSeg.track.id);
-            if (!nextPlatStep) break;
-            if (train.history.some(h => h.track.id === nextPlatStep.trackId && h.fromNode === lastSeg.toNode)) break;
-            let nextPlatTrack = window.tracks.find(x => x.id === nextPlatStep.trackId);
-            if (!nextPlatTrack) break;
-
-            train.history.push({
-                track: nextPlatTrack,
-                fromNode: lastSeg.toNode, toNode: nextPlatStep.to,
-                startDist: lastSeg.endDist, endDist: lastSeg.endDist + nextPlatTrack.length
-            });
-            continue;
-        }
-
-        let lookaheadEnd = lastSeg.endDist;
-        if (lookaheadEnd - train.headDist > ROUTE_LOOKAHEAD) break;
-
-        let inCooldown = (train._turnaroundCooldown || 0) > 0;
-        // During cooldown: suppress the incoming-track-id so we don't get a false U-turn
-        // on the very track the train just reversed onto.  But do NOT allow sharp turns —
-        // that causes the train to take impossible geometry paths.
-        let incomingTidForStep = (train._justSpawned || inCooldown) ? null : lastSeg.track.id;
-        let allowSharp = !!(train._justSpawned); // only allow sharp turns on very first spawn step
-        let nextStep = window.findNextTrack(g, lastSeg.toNode, platIds, incomingTidForStep, allowSharp);
-        if (nextStep && train._justSpawned) train._justSpawned = false;
-
-        if (!nextStep) {
-            let isStillInDepot = train.history.length === 1 && train.headDist < lastSeg.endDist + 50;
-            let inCooldown = (train._turnaroundCooldown || 0) > 0;
-
-            // If we hit a dead-end while in cooldown AND the cooldown was just set
-            // (>= 2s remaining means we're right at the terminal), cancel cooldown
-            // so findTurnaroundArea can run immediately.  Do NOT cancel mid-route
-            // (cooldown < 2s) — that protects against false U-turn detection while
-            // the train is still navigating through the turnaround area.
-            if (!isStillInDepot && inCooldown && (train._turnaroundCooldown || 0) >= 2) {
-                train._turnaroundCooldown = 0;
-                inCooldown = false;
-            }
-
-            if (!isStillInDepot && !inCooldown) {
-                let taIncoming = lastSeg.track.id;
-                let turnaround = window.findTurnaroundArea(g, lastSeg.toNode, taIncoming, train.trainLength);
-                if (turnaround) {
-                    console.log(`[SIM] Train ${train.id} will approach turnaround area ${turnaround.areaId}`);
-                    train._turnaroundTarget = turnaround;
-                    train._needsTurnaround = false;
-                    _extendTowardTurnaround(train, g);
-                } else {
-                    console.warn(`[SIM] No turnaround area reachable for train ${train.id} at node ${lastSeg.toNode} — stopping`);
-                    train._needsTurnaround = true;
-                }
-            }
-            break;
-        }
-
-        // Prevent loops: block adding the same track from the same fromNode.
-        // Allow same track id from a different fromNode — legitimate after a terminal
-        // turnaround when the train re-enters the platform in the opposite direction.
-        if (train.history.some(h => h.track
-            && h.track.id.toString() === nextStep.trackId.toString()
-            && h.fromNode.toString() === lastSeg.toNode.toString())) break;
-
-        let nextTrack = window.tracks.find(x => x.id === nextStep.trackId);
-        if (!nextTrack) break;
-
-        train.history.push({
-            track: nextTrack,
-            fromNode: lastSeg.toNode, toNode: nextStep.to,
-            startDist: lastSeg.endDist, endDist: lastSeg.endDist + nextTrack.length
-        });
-    }
-};
-
-// Extend history toward the turnaround area step by step.
-// Follows ta.approachPath entries first, then enters the area tracks in order.
-// Never skips segments (prevents teleporting) and avoids calling findNextTrack
-// at dead-end area nodes (which caused the "no path" stuck bug).
-function _extendTowardTurnaround(train, g) {
-    let ta = train._turnaroundTarget;
-    if (!ta) return;
-
-    let areaIds = ta.trackIds.map(String);
-    let sanity = 0;
-
-    while (sanity++ < 200) {
-        let lastSeg = train.history[train.history.length - 1];
-        if (!lastSeg || !lastSeg.track) break;
-
-        // Stop extending if we have enough look-ahead
-        let lookaheadEnd = lastSeg.endDist;
-        if (lookaheadEnd - train.headDist > ROUTE_LOOKAHEAD) break;
-
-        let lastId = lastSeg.track.id.toString();
-        let alreadyInArea = areaIds.includes(lastId);
-
-        if (alreadyInArea) {
-            // Count area tracks already in history
-            let areaInHistory = new Set(
-                train.history
-                    .filter(h => h.track && areaIds.includes(h.track.id.toString()))
-                    .map(h => h.track.id.toString())
-            );
-            if (areaInHistory.size >= areaIds.length) break; // all area tracks loaded — done
-
-            // Find next area track we haven't loaded yet, reachable from lastSeg.toNode
-            // Use findNextTrack with allowSharpTurns=true (area may have tight geometry)
-            // but guard against dead-end nodes (toNode has no outgoing edge to remaining area tracks)
-            let remainingAreaIds = areaIds.filter(id => !areaInHistory.has(id));
-            let nextStep = window.findNextTrack(g, lastSeg.toNode, remainingAreaIds, lastSeg.track.id, true);
-            if (!nextStep) break; // dead-end inside area — stop here, train will reverse from this point
-            if (train.history.some(h => h.track && h.track.id.toString() === nextStep.trackId.toString())) break;
-            let nextTrack = window.tracks.find(x => x.id === nextStep.trackId);
-            if (!nextTrack) break;
-            train.history.push({
-                track: nextTrack,
-                fromNode: lastSeg.toNode, toNode: nextStep.to,
-                startDist: lastSeg.endDist, endDist: lastSeg.endDist + nextTrack.length
-            });
-            continue;
-        }
-
-        // Not yet in area — follow approachPath sequentially to avoid teleporting.
-        // Find the next step in the pre-computed approachPath that starts from lastSeg.toNode.
-        let approachPath = ta.approachPath || [];
-        let nextApproachStep = null;
-
-        // Find the first approachPath entry whose fromNode matches lastSeg.toNode
-        // and whose track isn't already in history IN THE SAME DIRECTION.
-        // Allow a track that appears in history in the opposite direction (reversed traversal
-        // when the turnaround area is behind the terminal and the train must back through it).
-        for (let step of approachPath) {
-            if (step.fromNode.toString() === lastSeg.toNode.toString()
-                && !train.history.some(h => h.track
-                    && h.track.id.toString() === step.trackId.toString()
-                    && h.fromNode.toString() === step.fromNode.toString())) {
-                nextApproachStep = step;
-                break;
-            }
-        }
-
-        if (nextApproachStep) {
-            // Follow the pre-computed approach path step
-            let nextTrack = window.tracks.find(x => x.id === nextApproachStep.trackId
-                || x.id.toString() === nextApproachStep.trackId.toString());
-            if (!nextTrack) break;
-            train.history.push({
-                track: nextTrack,
-                fromNode: lastSeg.toNode, toNode: nextApproachStep.toNode,
-                startDist: lastSeg.endDist, endDist: lastSeg.endDist + nextTrack.length
-            });
-        } else {
-            // Approach path exhausted or we've reached a node adjacent to the area —
-            // try stepping directly into the area
-            let nextStep = window.findNextTrack(g, lastSeg.toNode, areaIds, lastSeg.track.id, true);
-            if (!nextStep) {
-                console.warn(`[SIM] Train ${train.id} lost approach to turnaround area — aborting`);
-                train._turnaroundTarget = null;
-                break;
-            }
-            if (train.history.some(h => h.track && h.track.id.toString() === nextStep.trackId.toString())) break;
-            let nextTrack = window.tracks.find(x => x.id === nextStep.trackId);
-            if (!nextTrack) break;
-            train.history.push({
-                track: nextTrack,
-                fromNode: lastSeg.toNode, toNode: nextStep.to,
-                startDist: lastSeg.endDist, endDist: lastSeg.endDist + nextTrack.length
-            });
-        }
-    }
-}
-// =============================================================================
-// EXTEND HISTORY TOWARD DEPOT (no loop-prevention guard)
-//
-// Returning trains must re-traverse tracks they already used going the other
-// way. The standard extendTrainHistory loop-prevention guard (same trackId +
-// same fromNode) blocks this. This function is identical in structure but
-// omits that guard, so the pathfinder can route back through already-seen
-// tracks in the opposite direction.
-// Still respects sharp-turn rejection and turnaround area logic.
-// =============================================================================
-function _extendTowardDepot(train, g, depotStation) {
-    if (!depotStation) return;
-
-    // If already committed to a turnaround en route to depot, extend toward it.
-    if (train._turnaroundTarget) {
-        _extendTowardTurnaround(train, g);
-        return;
-    }
-
-    let platIds = depotStation.trackIds.map(String);
-    let sanity = 0;
-
-    while (sanity++ < 200) {
-        let lastSeg = train.history[train.history.length - 1];
-        if (!lastSeg || !lastSeg.track) break;
-
-        let lastId = lastSeg.track.id.toString();
-        let lastIsOnPlat = platIds.includes(lastId);
-
-        // Already on a depot track — load all depot tracks into history
-        if (lastIsOnPlat) {
-            let platInHistory = new Set(
-                train.history.filter(h => h.track && platIds.includes(h.track.id.toString()))
-                    .map(h => h.track.id.toString())
-            );
-            if (platInHistory.size >= platIds.length) break;
-
-            let nextPlatStep = window.findNextTrack(g, lastSeg.toNode, platIds, lastSeg.track.id);
-            if (!nextPlatStep) break;
-            // Only block if same track traversed in exact same direction (true duplicate)
-            if (train.history.some(h => h.track
-                && h.track.id.toString() === nextPlatStep.trackId.toString()
-                && h.fromNode.toString() === lastSeg.toNode.toString()
-                && h.toNode.toString() === nextPlatStep.to.toString())) break;
-            let nextPlatTrack = window.tracks.find(x => x.id === nextPlatStep.trackId);
-            if (!nextPlatTrack) break;
-            train.history.push({
-                track: nextPlatTrack,
-                fromNode: lastSeg.toNode, toNode: nextPlatStep.to,
-                startDist: lastSeg.endDist, endDist: lastSeg.endDist + nextPlatTrack.length
-            });
-            continue;
-        }
-
-        let lookaheadEnd = lastSeg.endDist;
-        if (lookaheadEnd - train.headDist > ROUTE_LOOKAHEAD) break;
-
-        let inCooldown = (train._turnaroundCooldown || 0) > 0;
-        let incomingTidForStep = inCooldown ? null : lastSeg.track.id;
-        let nextStep = window.findNextTrack(g, lastSeg.toNode, platIds, incomingTidForStep, false);
-
-        if (!nextStep) {
-            // Dead-end — check for a turnaround area en route to depot
-            if (inCooldown && (train._turnaroundCooldown || 0) >= 2) {
-                train._turnaroundCooldown = 0;
-                inCooldown = false;
-            }
-            if (!inCooldown) {
-                let turnaround = window.findTurnaroundArea(g, lastSeg.toNode, lastSeg.track.id, train.trainLength);
-                if (turnaround) {
-                    train._turnaroundTarget = turnaround;
-                    train._needsTurnaround = false;
-                    _extendTowardTurnaround(train, g);
-                } else {
-                    train._needsTurnaround = true;
-                }
-            }
-            break;
-        }
-
-        // Loop guard: only block exact same-direction duplicate (fromNode AND toNode match).
-        // This allows re-traversal of a track in the OPPOSITE direction (return trip).
-        if (train.history.some(h => h.track
-            && h.track.id.toString() === nextStep.trackId.toString()
-            && h.fromNode.toString() === lastSeg.toNode.toString()
-            && h.toNode.toString() === nextStep.to.toString())) break;
-
-        let nextTrack = window.tracks.find(x => x.id === nextStep.trackId);
-        if (!nextTrack) break;
-
-        train.history.push({
-            track: nextTrack,
-            fromNode: lastSeg.toNode, toNode: nextStep.to,
-            startDist: lastSeg.endDist, endDist: lastSeg.endDist + nextTrack.length
-        });
-    }
-}
 
 // Returns distance from headDist to the computed stop position.
 // Returns Infinity if platform not yet visible in history.
@@ -1714,38 +874,40 @@ function brakingDist(speed, brakeRate) {
 // New headDist = total length of reversed segments (old tail is now far end).
 // =============================================================================
 window.performTurnaround = function (train) {
+    // Clamp tailDist so it never goes before what history covers
     let tailDist = train.headDist - train.trainLength;
-
-    // If history doesn't reach back to the tail (e.g. segments were cleaned before
-    // TURNAROUND fired), clamp tailDist to the earliest available segment so we
-    // don't produce a zero-length reversed block that causes carriages to clip.
     if (train.history.length > 0) {
         tailDist = Math.max(tailDist, train.history[0].startDist);
     }
 
-    // Collect segments the train body overlaps, sorted earliest first.
+    // Collect ALL segments the train body touches (head..tail), sorted earliest first.
+    // Use a slightly wider window (±1m) to avoid off-by-one at segment boundaries.
     let occupied = train.history
-        .filter(h => h.endDist > tailDist && h.startDist < train.headDist)
+        .filter(h => h.track && h.endDist > tailDist - 1 && h.startDist < train.headDist + 1)
         .sort((a, b) => a.startDist - b.startDist);
 
+    // Need at least one valid segment
+    occupied = occupied.filter(h => h && h.track);
     if (occupied.length === 0) {
-        train.state = 'DESPAWNING';
-        return false;
+        // Try to salvage: use the current segment
+        let cur = train.history[train.history.length - 1];
+        if (cur && cur.track) {
+            occupied = [cur];
+        } else {
+            train.state = 'DESPAWNING';
+            return false;
+        }
     }
 
-    // Figure out the old tail's position WITHIN the occupied block coordinate space.
-    // The occupied block starts at occupied[0].startDist.
-    // tailDist may be before that (overhang before first segment, e.g. in depot).
     let blockStart = occupied[0].startDist;
-    // Offset of old tail from block start (clamped to 0 if it overhangs before the block)
+    // How far the old tail was from the block start (clamped ≥ 0)
     let tailOffsetFromBlockStart = Math.max(0, tailDist - blockStart);
 
-    // Rebuild reversed: last segment first, swap fromNode/toNode
+    // Rebuild reversed: last occupied segment first, swap fromNode/toNode
     let reversed = [];
     let cum = 0;
     for (let i = occupied.length - 1; i >= 0; i--) {
         let h = occupied[i];
-        if (!h || !h.track) continue;
         reversed.push({
             track: h.track,
             fromNode: h.toNode,
@@ -1756,25 +918,22 @@ window.performTurnaround = function (train) {
         cum += h.track.length;
     }
 
-    if (reversed.length === 0) {
-        train.state = 'DESPAWNING';
-        return false;
+    if (reversed.length === 0 || cum < 0.1) {
+        // Safety: just reverse the last segment
+        let last = train.history[train.history.length - 1];
+        if (!last || !last.track) { train.state = 'DESPAWNING'; return false; }
+        reversed = [{ track: last.track, fromNode: last.toNode, toNode: last.fromNode, startDist: 0, endDist: last.track.length }];
+        cum = last.track.length;
+        tailOffsetFromBlockStart = 0;
     }
 
     train.history = reversed;
 
-    // In the reversed block (total length = cum):
-    //   - dist=0 corresponds to the old HEAD end
-    //   - dist=cum corresponds to the old TAIL end
-    //
-    // The old tail was at (tailOffsetFromBlockStart) from the block start.
-    // In reversed space that maps to: cum - tailOffsetFromBlockStart
-    // (because the first segment of the reversed block is the last of the original).
-    //
-    // New headDist = position of old tail in reversed coordinates.
+    // New headDist: in reversed coords, old tail position = cum - tailOffsetFromBlockStart
     let newHeadDist = cum - tailOffsetFromBlockStart;
-    // Clamp to valid range [0, cum]
-    train.headDist = Math.max(0, Math.min(cum, newHeadDist));
+    // Ensure head is inside history range and has at least trainLength behind it
+    newHeadDist = Math.max(train.trainLength * 0.1, Math.min(cum, newHeadDist));
+    train.headDist = newHeadDist;
 
     return true;
 };
@@ -1801,11 +960,11 @@ window.updateSim = function (dt) {
                     deps.forEach(dep => {
                         if (window.sim.time >= dep.time - 180 && !dep.spawned) {
                             // Use all depots that serve this line
-                            let lineDepots = window.depots.filter(d => !d.line || d.line.includes(l.name) || d.line === '');
+                            let lineDepots = window.depots.filter(d => d.line && d.line.includes(l.name));
                             if (lineDepots.length > 0 && l[dir].stations.length > 0) {
                                 let spawned = false;
                                 for (let depot of lineDepots) {
-                                    let train = window.spawnTrainOnLine(l, dir, depot);
+                                    let train = window.spawnTrainOnLine(l, dir, depot, g);
                                     if (train) { window.trains.push(train); spawned = true; break; }
                                 }
                             }
@@ -1992,864 +1151,1005 @@ window.updateSim = function (dt) {
     }
 
     // --- PHYSICS LOOP ---
-    let dtSec = Math.min((dt / 1000) * window.sim.speed, 5.0);
+    // Use fixed sub-steps to avoid huge single-tick jumps at high sim speeds.
+    // Each sub-step is at most MAX_SUBSTEP_SEC of sim-time, so physics stays accurate.
+    // This also prevents the requestAnimationFrame [Violation] by keeping each frame's
+    // total sim work bounded regardless of sim speed.
+    const MAX_SUBSTEP_SEC = 0.25; // max sim-time per physics sub-step
+    // Cap total sim-time per frame to avoid [Violation] warnings.
+    // At 300x speed, a 16ms frame = 4.8 sim-seconds. With 0.25s sub-steps that's 19 iterations.
+    // Cap wall-clock work to ~33ms equivalent: real_dt=33ms → max 33ms * speed of sim work.
+    // This means at 300x, we do at most ~10 sub-steps of 0.25s = 2.5 sim-seconds per frame.
+    // Trains will run slightly slower than real 300x but won't freeze the browser.
+    let totalSimDt = Math.min((dt / 1000) * window.sim.speed, MAX_SUBSTEP_SEC * 10); // at most 10 sub-steps per frame
+    let remainingSim = totalSimDt;
 
-    window.trains.forEach(tr => {
-        let lObj = window.sim.lines.find(x => x.id === tr.lineId);
-        if (!lObj) { tr.state = 'DESPAWNING'; return; }
+    // Run physics in sub-steps; build graph once per frame (not per sub-step)
+    while (remainingSim > 0) {
+        let dtSec = Math.min(remainingSim, MAX_SUBSTEP_SEC);
+        remainingSim -= dtSec;
 
-        if (!tr.history || tr.history.length === 0 || !tr.history[tr.history.length - 1] || !tr.history[tr.history.length - 1].track) {
-            tr.state = 'DESPAWNING'; return;
-        }
+        window.trains.forEach(tr => {
+            let lObj = window.sim.lines.find(x => x.id === tr.lineId);
+            if (!lObj) { tr.state = 'DESPAWNING'; return; }
 
-        if (tr.state === 'DRIVING' || tr.state === 'BRAKING') {
-            // Tick turnaround cooldown (time-based so it works correctly at all sim speeds)
-            if (tr._turnaroundCooldown > 0) tr._turnaroundCooldown -= dtSec;
-            // Accumulate journey time for headway regulation (driving portion)
-            if (tr._slotTotal > 1) tr._journeyTime = (tr._journeyTime || 0) + dtSec;
-
-            let stations = lObj[tr.dirPhase].stations;
-            let targetStation = window.selectActiveStation(stations[tr.nextStationIdx]);
-            let currentSeg = tr.history[tr.history.length - 1];
-
-            if (!currentSeg || !currentSeg.track) { tr.state = 'DESPAWNING'; return; }
-
-            // --- LOOK-AHEAD: extend history toward next station (or turnaround area) ---
-            tr._needsTurnaround = false;
-            window.extendTrainHistory(tr, g, targetStation);
-
-            // If extendTrainHistory found a turnaround area, switch to approach mode
-            if (tr._turnaroundTarget && tr.state !== 'TURNAROUND_APPROACH') {
-                tr.state = 'TURNAROUND_APPROACH';
-                return; // let TURNAROUND_APPROACH handler take over next tick
-            }
-
-            // If no path and no turnaround area available, brake and stop
-            if (tr._needsTurnaround) {
-                if (tr.speed > 0.05) {
-                    tr.speed -= tr.brake * dtSec;
-                    if (tr.speed < 0) tr.speed = 0;
-                    tr.headDist += tr.speed * dtSec;
-                } else {
-                    tr.speed = 0;
-                    // Stay stopped — cannot proceed without a turnaround area
-                }
-                if (window.selectedTrain && window.selectedTrain.id === tr.id) {
-                    document.getElementById('train-info-speed').innerText = Math.round(tr.speed * 3.6);
-                    document.getElementById('train-info-state').innerText = 'NO_PATH' + (tr.returningToDepot ? ' [->Depot]' : '');
-                    document.getElementById('train-info-next').innerText = 'Station ' + (tr.nextStationIdx + 1);
-                }
+            if (!tr.history || tr.history.length === 0) {
+                // Don't immediately despawn - could be transient during cleanup. Log and skip.
+                console.warn('[SIM] Train', tr.id, 'has empty history, skipping tick');
                 return;
             }
-
-            // --- COMPUTE DISTANCE TO STOP ---
-            let distToStop = window.computeDistToStop(tr, targetStation, tr.history);
-
-            // --- SPEED LIMIT ON CURRENT SEGMENT (segment the HEAD is actually on) ---
-            let trMaxSpeedMs = tr.maxSpeed / 3.6;
-
-            // Find the history segment that contains headDist (not the look-ahead tail)
-            let headSeg = null;
-            for (let i = 0; i < tr.history.length; i++) {
-                let h = tr.history[i];
-                let isLast = (i === tr.history.length - 1);
-                if (tr.headDist >= h.startDist && (isLast ? tr.headDist <= h.endDist : tr.headDist < h.endDist)) {
-                    headSeg = h;
-                    break;
-                }
+            // Remove null/trackless segments from history tail (can appear after filter operations)
+            while (tr.history.length > 1 && (!tr.history[tr.history.length - 1] || !tr.history[tr.history.length - 1].track)) {
+                tr.history.pop();
             }
-            if (!headSeg) headSeg = currentSeg; // fallback
+            if (!tr.history[tr.history.length - 1] || !tr.history[tr.history.length - 1].track) {
+                tr.state = 'DESPAWNING'; return;
+            }
 
-            let headSegLimitMs = headSeg.track.speedLimit ? headSeg.track.speedLimit / 3.6 : trMaxSpeedMs;
-            let speedCap = Math.min(trMaxSpeedMs, headSegLimitMs);
+            if (tr.state === 'DRIVING' || tr.state === 'BRAKING') {
+                // Tick turnaround cooldown (time-based so it works correctly at all sim speeds)
+                if (tr._turnaroundCooldown > 0) tr._turnaroundCooldown -= dtSec;
+                // Accumulate journey time for headway regulation (driving portion)
+                if (tr._slotTotal > 1) tr._journeyTime = (tr._journeyTime || 0) + dtSec;
 
-            // ---------------------------------------------------------------
-            // HEADWAY REGULATION (time-gap based)
-            //
-            // Look at the train AHEAD of us on the line. Measure the real-time
-            // gap between this train's departure time and the preceding train's.
-            // If we are running AHEAD of our target gap → slow down.
-            // We only do this when well clear of a station braking zone.
-            //
-            // Gap is measured in sim-time seconds, not position.
-            // This means trains that are all early/all late don't affect each other —
-            // only bunching (one train catching another) is corrected.
-            // ---------------------------------------------------------------
-            let withinBrakingZone = distToStop !== Infinity &&
-                distToStop < (tr.speed * tr.speed) / (2 * tr.brake) * 2.5 + 50;
-
-            if (!withinBrakingZone && tr._slotTotal > 1 && tr._roundTripTime > 0) {
-                // Find the train immediately AHEAD of us on this line
-                // "Ahead" = the train with the closest _journeyTime that is greater than ours
-                // (wrapping around the round trip cycle).
-                let myTime = tr._journeyTime || 0;
-                let targetGap = tr._roundTripTime / tr._slotTotal; // ideal gap between trains
-
-                let minGapAhead = Infinity;
-                window.trains.forEach(other => {
-                    if (other.id === tr.id || other.lineId !== tr.lineId || other.returningToDepot) return;
-                    let otherTime = other._journeyTime || 0;
-                    // Gap from us to train ahead (modular arithmetic)
-                    let gap = ((otherTime - myTime) % tr._roundTripTime + tr._roundTripTime) % tr._roundTripTime;
-                    if (gap > 0 && gap < minGapAhead) minGapAhead = gap;
-                });
-
-                if (minGapAhead < Infinity) {
-                    // How much are we closing in? (gap < targetGap means we're too close)
-                    let excessCloseness = targetGap - minGapAhead; // positive = we're too close
-                    if (excessCloseness > 0 && targetGap > 0) {
-                        let aheadFraction = Math.min(excessCloseness / targetGap, 1.0);
-                        const REGULATION_STRENGTH = 0.55;
-                        const MIN_FACTOR = 0.35;
-                        let factor = 1.0 - aheadFraction * REGULATION_STRENGTH;
-                        factor = Math.max(factor, MIN_FACTOR);
-                        speedCap *= factor;
+                // Clear post-reversal flag once the train head moves onto a track that
+                // is not part of any turnaround area, meaning it has successfully departed.
+                if (tr._justReversed) {
+                    let headSeg0 = tr.history.find(h => h.startDist <= tr.headDist && h.endDist >= tr.headDist);
+                    if (!headSeg0) headSeg0 = tr.history[tr.history.length - 1];
+                    let taIds = new Set((window.turnaroundAreas || []).flatMap(a => a.trackIds.map(String)));
+                    if (headSeg0 && headSeg0.track && !taIds.has(String(headSeg0.track.id))) {
+                        tr._justReversed = false;
                     }
                 }
-            }
 
-            // ---------------------------------------------------------------
-            // LOOK-AHEAD SPEED LIMIT ENFORCEMENT
-            //
-            // For each upcoming segment with a lower speed limit, compute the
-            // maximum speed we can be travelling RIGHT NOW and still brake to
-            // that limit exactly at the segment boundary.
-            //
-            // Kinematic: v_now_max = sqrt(v_limit² + 2 * brake * dist_to_boundary)
-            //
-            // This ensures we start braking at exactly the right moment —
-            // not too early, not too late.
-            // ---------------------------------------------------------------
-            for (let h of tr.history) {
-                if (h.startDist <= tr.headDist) continue; // behind or at head
-                let distToSegStart = h.startDist - tr.headDist;
-                let hLimitMs = h.track.speedLimit ? h.track.speedLimit / 3.6 : trMaxSpeedMs;
-                if (hLimitMs >= speedCap) continue; // not a restriction
-                // Max speed now so we can reach hLimitMs exactly at segment entry
-                let maxNow = Math.sqrt(hLimitMs * hLimitMs + 2 * tr.brake * distToSegStart);
-                if (maxNow < speedCap) speedCap = maxNow;
-            }
+                let stations = lObj[tr.dirPhase].stations;
+                let targetStation = window.getTargetStation(tr, lObj);
+                let currentSeg = tr.history[tr.history.length - 1];
 
-            // ---------------------------------------------------------------
-            // KINEMATIC ADAPTIVE BRAKING FOR STATION STOP
-            //
-            // Target speed on the ideal braking curve at distance distToStop:
-            //   v_ideal = sqrt(2 * brake * distToStop)
-            //
-            // If the train is faster than v_ideal → decelerate.
-            // If the train is slower than v_ideal AND distToStop is still large
-            //   → accelerate back toward v_ideal (capped by speedCap).
-            //
-            // This eliminates snapping and creeping: the train naturally glides
-            // to a stop exactly at the platform using physics alone.
-            // ---------------------------------------------------------------
+                if (!currentSeg || !currentSeg.track) { tr.state = 'DESPAWNING'; return; }
 
-            // distToStop > 0: still approaching; < 0: overshot; Inf: no stop yet
-            let hasStop = distToStop !== Infinity;
+                // --- LOOK-AHEAD: extend history toward next station (or turnaround area) ---
+                // Loop to handle high simulation speeds where the head can outrun a single
+                // extension call. Keep extending until lookahead is satisfied or no progress.
+                tr._needsTurnaround = false;
+                let _extLoops = 0;
+                let _prevHistLen = -1;
+                while (_extLoops++ < 20 && !tr._turnaroundTarget && !tr._needsTurnaround) {
+                    let _beforeLen = tr.history.length;
+                    let _lastH = tr.history[tr.history.length - 1];
+                    let _lookaheadOk = _lastH && (_lastH.endDist - tr.headDist > ROUTE_LOOKAHEAD);
+                    if (_lookaheadOk) break;
+                    window.extendTrainHistory(tr, g, targetStation);
+                    // Stop if no new segments were added (prevents infinite loop on dead-end)
+                    if (tr.history.length === _beforeLen) break;
+                }
 
-            // Ideal speed on the braking curve at current distance.
-            // Overshot (negative distToStop) => ideal = 0, train must stop then reverse.
-            let idealStopSpeed = hasStop
-                ? Math.sqrt(2 * tr.brake * Math.max(distToStop, 0))
-                : Infinity;
+                // If extendTrainHistory found a turnaround area, switch to approach mode
+                if (tr._turnaroundTarget && tr.state !== 'TURNAROUND_APPROACH') {
+                    // For in-place turnarounds (approachPath empty), trim lookahead history
+                    // so _extendTowardTurnaround sees the area track as the last segment.
+                    if (tr._turnaroundTarget.approachPath && tr._turnaroundTarget.approachPath.length === 0) {
+                        tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
+                    }
+                    tr.state = 'TURNAROUND_APPROACH';
+                    return;
+                }
 
-            // Effective speed target: lower of track speed cap and braking curve
-            let effectiveTarget = Math.min(speedCap, idealStopSpeed);
+                // If no path and no turnaround area available, brake and stop
+                if (tr._needsTurnaround) {
+                    if (tr.speed > 0.05) {
+                        tr.speed -= tr.brake * dtSec;
+                        if (tr.speed < 0) tr.speed = 0;
+                        tr.headDist += tr.speed * dtSec;
+                    } else {
+                        tr.speed = 0;
+                        // Stay stopped — cannot proceed without a turnaround area
+                    }
+                    if (window.selectedTrain && window.selectedTrain.id === tr.id) {
+                        document.getElementById('train-info-speed').innerText = Math.round(tr.speed * 3.6);
+                        document.getElementById('train-info-state').innerText = 'NO_PATH' + (tr.returningToDepot ? ' [->Depot]' : '');
+                        document.getElementById('train-info-next').innerText = 'Station ' + (tr.nextStationIdx + 1);
+                    }
+                    // Clean up history tail so train doesn't despawn
+                    while (tr.history.length > 2 && tr.headDist - tr.trainLength > tr.history[1].endDist) {
+                        tr.history.shift();
+                    }
+                    return;
+                }
 
-            // Required decel to reach stop from current speed
-            let requiredDecel = hasStop && distToStop > 0.1
-                ? (tr.speed * tr.speed) / (2 * Math.max(distToStop, 0.1))
-                : 0;
+                // --- COMPUTE DISTANCE TO STOP ---
+                let distToStop = window.computeDistToStop(tr, targetStation, tr.history);
 
-            // Decide braking state
-            let brakeTriggerThreshold = tr.brake * 0.85;
-            if (hasStop && distToStop >= 0 && requiredDecel >= brakeTriggerThreshold) {
-                tr.state = 'BRAKING';
-            } else if (tr.state === 'BRAKING' && distToStop > brakingDist(tr.speed, tr.brake) + 15) {
-                tr.state = 'DRIVING';
-            }
+                // --- SPEED LIMIT ON CURRENT SEGMENT (segment the HEAD is actually on) ---
+                let trMaxSpeedMs = tr.maxSpeed / 3.6;
 
-            // --- UNIFIED SPEED CONTROL (no snapping, no force-stops) ---
-            if (tr.speed < effectiveTarget - 0.05) {
-                tr.speed += tr.accel * dtSec;
-                if (tr.speed > effectiveTarget) tr.speed = effectiveTarget;
-            } else if (tr.speed > effectiveTarget + 0.05) {
-                let velError = tr.speed - effectiveTarget;
-                let demandedDecel = requiredDecel + velError * 1.5;
-                demandedDecel = Math.min(demandedDecel, tr.ebrake);
-                demandedDecel = Math.max(demandedDecel, tr.brake * 0.1);
-                tr.speed -= demandedDecel * dtSec;
-                if (tr.speed < 0) tr.speed = 0;
-            } else {
-                tr.speed = Math.max(0, effectiveTarget);
-            }
+                // Find the history segment that contains headDist (not the look-ahead tail)
+                let headSeg = null;
+                for (let i = 0; i < tr.history.length; i++) {
+                    let h = tr.history[i];
+                    let isLast = (i === tr.history.length - 1);
+                    if (tr.headDist >= h.startDist && (isLast ? tr.headDist <= h.endDist : tr.headDist < h.endDist)) {
+                        headSeg = h;
+                        break;
+                    }
+                }
+                if (!headSeg) headSeg = currentSeg; // fallback
 
-            // --- COLLISION AVOIDANCE ---
-            let safetyDist = brakingDist(tr.speed, tr.brake) + 20;
-            let fPt = window.getPointOnHistory(tr.history, tr.headDist);
-            let obstacleAhead = false;
+                let headSegLimitMs = headSeg.track.speedLimit ? headSeg.track.speedLimit / 3.6 : trMaxSpeedMs;
+                let speedCap = Math.min(trMaxSpeedMs, headSegLimitMs);
 
-            if (fPt) {
-                window.trains.forEach(other => {
-                    if (other.id === tr.id || !other.history || other.history.length === 0) return;
-                    for (let i = 0; i < other.carriages; i++) {
-                        let cPos = other.headDist - (i * 26) - 12.5;
-                        let cPt = window.getPointOnHistory(other.history, cPos);
-                        if (cPt && dist(fPt, cPt) < safetyDist) {
-                            let toOther = Math.atan2(cPt.y - fPt.y, cPt.x - fPt.x);
-                            if (Math.abs(normalizeAngle(fPt.dir - toOther)) < Math.PI / 3) obstacleAhead = true;
+                // ---------------------------------------------------------------
+                // HEADWAY REGULATION (time-gap based)
+                //
+                // Look at the train AHEAD of us on the line. Measure the real-time
+                // gap between this train's departure time and the preceding train's.
+                // If we are running AHEAD of our target gap → slow down.
+                // We only do this when well clear of a station braking zone.
+                //
+                // Gap is measured in sim-time seconds, not position.
+                // This means trains that are all early/all late don't affect each other —
+                // only bunching (one train catching another) is corrected.
+                // ---------------------------------------------------------------
+                let withinBrakingZone = distToStop !== Infinity &&
+                    distToStop < (tr.speed * tr.speed) / (2 * tr.brake) * 2.5 + 50;
+
+                if (!withinBrakingZone && tr._slotTotal > 1 && tr._roundTripTime > 0) {
+                    // Find the train immediately AHEAD of us on this line
+                    // "Ahead" = the train with the closest _journeyTime that is greater than ours
+                    // (wrapping around the round trip cycle).
+                    let myTime = tr._journeyTime || 0;
+                    let targetGap = tr._roundTripTime / tr._slotTotal; // ideal gap between trains
+
+                    let minGapAhead = Infinity;
+                    window.trains.forEach(other => {
+                        if (other.id === tr.id || other.lineId !== tr.lineId || other.returningToDepot) return;
+                        let otherTime = other._journeyTime || 0;
+                        // Gap from us to train ahead (modular arithmetic)
+                        let gap = ((otherTime - myTime) % tr._roundTripTime + tr._roundTripTime) % tr._roundTripTime;
+                        if (gap > 0 && gap < minGapAhead) minGapAhead = gap;
+                    });
+
+                    if (minGapAhead < Infinity) {
+                        // How much are we closing in? (gap < targetGap means we're too close)
+                        let excessCloseness = targetGap - minGapAhead; // positive = we're too close
+                        if (excessCloseness > 0 && targetGap > 0) {
+                            let aheadFraction = Math.min(excessCloseness / targetGap, 1.0);
+                            const REGULATION_STRENGTH = 0.55;
+                            const MIN_FACTOR = 0.35;
+                            let factor = 1.0 - aheadFraction * REGULATION_STRENGTH;
+                            factor = Math.max(factor, MIN_FACTOR);
+                            speedCap *= factor;
                         }
                     }
-                });
-            }
+                }
 
-            if (obstacleAhead) {
-                tr.speed -= tr.ebrake * dtSec;
-                if (tr.speed < 0) tr.speed = 0;
-            }
+                // ---------------------------------------------------------------
+                // LOOK-AHEAD SPEED LIMIT ENFORCEMENT
+                //
+                // For each upcoming segment with a lower speed limit, compute the
+                // maximum speed we can be travelling RIGHT NOW and still brake to
+                // that limit exactly at the segment boundary.
+                //
+                // Kinematic: v_now_max = sqrt(v_limit² + 2 * brake * dist_to_boundary)
+                //
+                // This ensures we start braking at exactly the right moment —
+                // not too early, not too late.
+                // ---------------------------------------------------------------
+                for (let h of tr.history) {
+                    if (h.startDist <= tr.headDist) continue; // behind or at head
+                    let distToSegStart = h.startDist - tr.headDist;
+                    let hLimitMs = h.track.speedLimit ? h.track.speedLimit / 3.6 : trMaxSpeedMs;
+                    if (hLimitMs >= speedCap) continue; // not a restriction
+                    // Max speed now so we can reach hLimitMs exactly at segment entry
+                    let maxNow = Math.sqrt(hLimitMs * hLimitMs + 2 * tr.brake * distToSegStart);
+                    if (maxNow < speedCap) speedCap = maxNow;
+                }
 
-            // --- ADVANCE POSITION (no cap — physics handles overshoot) ---
-            tr.headDist += tr.speed * dtSec;
+                // ---------------------------------------------------------------
+                // KINEMATIC ADAPTIVE BRAKING FOR STATION STOP
+                //
+                // Target speed on the ideal braking curve at distance distToStop:
+                //   v_ideal = sqrt(2 * brake * distToStop)
+                //
+                // If the train is faster than v_ideal → decelerate.
+                // If the train is slower than v_ideal AND distToStop is still large
+                //   → accelerate back toward v_ideal (capped by speedCap).
+                //
+                // This eliminates snapping and creeping: the train naturally glides
+                // to a stop exactly at the platform using physics alone.
+                // ---------------------------------------------------------------
 
-            // --- MEMORY CLEANUP ---
-            while (tr.history.length > 1 && tr.headDist - tr.trainLength > tr.history[0].endDist) {
-                tr.history.shift();
-            }
+                // distToStop > 0: still approaching; < 0: overshot; Inf: no stop yet
+                let hasStop = distToStop !== Infinity;
 
-            // --- ARRIVED / OVERSHOT CHECK ---
-            // No position teleport. Dwell when stopped within ±1 m of stop point.
-            // If overshot by more than 1 m, switch to REVERSING_TO_STOP.
-            if (targetStation) {
-                let stopHd = window.getPlatformStopHeadDist(tr, targetStation, tr.history);
-                if (stopHd !== null && tr.speed < 0.05) {
-                    let err = tr.headDist - stopHd; // positive = overshot
-                    if (Math.abs(err) <= 1.0) {
-                        let platSegs = tr.history.filter(h => h.track && targetStation.trackIds.includes(h.track.id.toString()));
-                        if (platSegs.length > 0) {
+                // Ideal speed on the braking curve at current distance.
+                // Overshot (negative distToStop) => ideal = 0, train must stop then reverse.
+                let idealStopSpeed = hasStop
+                    ? Math.sqrt(2 * tr.brake * Math.max(distToStop, 0))
+                    : Infinity;
+
+                // Effective speed target: lower of track speed cap and braking curve
+                let effectiveTarget = Math.min(speedCap, idealStopSpeed);
+
+                // Required decel to reach stop from current speed
+                let requiredDecel = hasStop && distToStop > 0.1
+                    ? (tr.speed * tr.speed) / (2 * Math.max(distToStop, 0.1))
+                    : 0;
+
+                // Decide braking state
+                let brakeTriggerThreshold = tr.brake * 0.85;
+                if (hasStop && distToStop >= 0 && requiredDecel >= brakeTriggerThreshold) {
+                    tr.state = 'BRAKING';
+                } else if (tr.state === 'BRAKING' && distToStop > brakingDist(tr.speed, tr.brake) + 15) {
+                    tr.state = 'DRIVING';
+                }
+
+                // --- UNIFIED SPEED CONTROL (no snapping, no force-stops) ---
+                if (tr.speed < effectiveTarget - 0.05) {
+                    tr.speed += tr.accel * dtSec;
+                    if (tr.speed > effectiveTarget) tr.speed = effectiveTarget;
+                } else if (tr.speed > effectiveTarget + 0.05) {
+                    let velError = tr.speed - effectiveTarget;
+                    let demandedDecel = requiredDecel + velError * 1.5;
+                    demandedDecel = Math.min(demandedDecel, tr.ebrake);
+                    demandedDecel = Math.max(demandedDecel, tr.brake * 0.1);
+                    tr.speed -= demandedDecel * dtSec;
+                    if (tr.speed < 0) tr.speed = 0;
+                } else {
+                    tr.speed = Math.max(0, effectiveTarget);
+                }
+
+                // --- COLLISION AVOIDANCE ---
+                let safetyDist = brakingDist(tr.speed, tr.brake) + 20;
+                let fPt = window.getPointOnHistory(tr.history, tr.headDist);
+                let obstacleAhead = false;
+
+                if (fPt) {
+                    window.trains.forEach(other => {
+                        if (other.id === tr.id || !other.history || other.history.length === 0) return;
+                        for (let i = 0; i < other.carriages; i++) {
+                            let cPos = other.headDist - (i * 26) - 12.5;
+                            let cPt = window.getPointOnHistory(other.history, cPos);
+                            if (cPt && dist(fPt, cPt) < safetyDist) {
+                                let toOther = Math.atan2(cPt.y - fPt.y, cPt.x - fPt.x);
+                                if (Math.abs(normalizeAngle(fPt.dir - toOther)) < Math.PI / 3) obstacleAhead = true;
+                            }
+                        }
+                    });
+                }
+
+                if (obstacleAhead) {
+                    tr.speed -= tr.ebrake * dtSec;
+                    if (tr.speed < 0) tr.speed = 0;
+                }
+
+                // --- ADVANCE POSITION (no cap — physics handles overshoot) ---
+                tr.headDist += tr.speed * dtSec;
+
+                // --- MEMORY CLEANUP ---
+                // Keep at least one segment before the tail so getPointOnHistory always works
+                while (tr.history.length > 2 && tr.headDist - tr.trainLength > tr.history[1].endDist) {
+                    tr.history.shift();
+                }
+
+                // --- ARRIVED / OVERSHOT CHECK ---
+                // No position teleport. Dwell when stopped within ±1 m of stop point.
+                // If overshot by more than 1 m, switch to REVERSING_TO_STOP.
+                if (targetStation) {
+                    let stopHd = window.getPlatformStopHeadDist(tr, targetStation, tr.history);
+                    if (stopHd !== null && tr.speed < 0.05) {
+                        let err = tr.headDist - stopHd; // positive = overshot
+                        if (Math.abs(err) <= 1.0) {
+                            let platSegs = tr.history.filter(h => h.track && targetStation.trackIds.includes(h.track.id.toString()));
+                            if (platSegs.length > 0) {
+                                tr.speed = 0;
+                                tr.state = 'DWELLING';
+                                tr.dwellTimer = targetStation.dwell || 30;
+                                // Arrival guard: only advance nextStationIdx once per stop
+                                if (!tr._stationArrived) {
+                                    tr._stationArrived = true;
+                                    tr.nextStationIdx++;
+                                }
+                                tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
+                                tr._route = null; tr._routeKey = null; tr._pathCache = null;
+                            }
+                        } else if (err > 1.0) {
+                            // Overshot — reverse back to stop point
+                            tr._reverseToStop = { stopHd, targetStation };
+                            tr.state = 'REVERSING_TO_STOP';
+                        }
+                        // Stopped short outside tolerance: braking curve re-accelerates next tick
+                    }
+                }
+
+            } else if (tr.state === 'REVERSING_TO_STOP') {
+                // Train overshot the platform stop point by > 1 m.
+                // Reverse at low speed until within 1 m, then dwell.
+                let rv = tr._reverseToStop;
+                if (!rv) { tr.state = 'DRIVING'; }
+                else {
+                    let stopHd = window.getPlatformStopHeadDist(tr, rv.targetStation, tr.history);
+                    if (stopHd === null) { tr.state = 'DRIVING'; }
+                    else {
+                        let err = tr.headDist - stopHd; // positive = still overshot
+                        if (err <= 1.0) {
+                            // Close enough — accept position as-is and dwell
+                            tr._reverseToStop = null;
                             tr.speed = 0;
                             tr.state = 'DWELLING';
-                            tr.dwellTimer = targetStation.dwell || 30;
-                            tr.nextStationIdx++;
-                        }
-                    } else if (err > 1.0) {
-                        // Overshot — reverse back to stop point
-                        tr._reverseToStop = { stopHd, targetStation };
-                        tr.state = 'REVERSING_TO_STOP';
-                    }
-                    // Stopped short outside tolerance: braking curve re-accelerates next tick
-                }
-            }
-
-        } else if (tr.state === 'REVERSING_TO_STOP') {
-            // Train overshot the platform stop point by > 1 m.
-            // Reverse at low speed until within 1 m, then dwell.
-            let rv = tr._reverseToStop;
-            if (!rv) { tr.state = 'DRIVING'; }
-            else {
-                let stopHd = window.getPlatformStopHeadDist(tr, rv.targetStation, tr.history);
-                if (stopHd === null) { tr.state = 'DRIVING'; }
-                else {
-                    let err = tr.headDist - stopHd; // positive = still overshot
-                    if (err <= 1.0) {
-                        // Close enough — accept position as-is and dwell
-                        tr._reverseToStop = null;
-                        tr.speed = 0;
-                        tr.state = 'DWELLING';
-                        tr.dwellTimer = rv.targetStation.dwell || 30;
-                        tr.nextStationIdx++;
-                    } else {
-                        // Reverse speed: proportional up to a cap (~10 km/h), minimum creep
-                        let reverseSpeed = Math.min(err * 0.5, 3.0); // m/s
-                        reverseSpeed = Math.max(reverseSpeed, 0.3);
-                        // Move backward (decrease headDist)
-                        tr.headDist -= reverseSpeed * dtSec;
-                        tr.speed = 0; // reported speed shown as 0 while reversing
-                    }
-                }
-            }
-
-        } else if (tr.state === 'DWELLING') {
-            tr.dwellTimer -= dtSec;
-            // Count dwell time toward journey time for headway regulation
-            if (tr._slotTotal > 1) tr._journeyTime = (tr._journeyTime || 0) + dtSec;
-            if (tr.dwellTimer <= 0) {
-                let stations = lObj[tr.dirPhase].stations;
-                if (tr.nextStationIdx >= stations.length) {
-                    // ── Reached the terminal station ──────────────────────────
-                    if (tr.returningToDepot) {
-                        // Need to return to depot, but first check if a turnaround is required.
-                        // If the terminal is a turnaround area, reverse first so the train
-                        // faces the right direction. _resumeDepotReturn signals TURNAROUND_REVERSE
-                        // to transition to RETURNING_TO_DEPOT instead of DRIVING.
-                        let _hdSeg = null;
-                        for (let i = tr.history.length - 1; i >= 0; i--) {
-                            if (tr.history[i].startDist <= tr.headDist) { _hdSeg = tr.history[i]; break; }
-                        }
-                        let _lastSeg = _hdSeg || tr.history[tr.history.length - 1];
-                        let _curTids = tr.history
-                            .filter(h => h.track && h.startDist < tr.headDist && h.endDist > tr.headDist - tr.trainLength)
-                            .map(h => h.track.id.toString());
-                        let _inPlaceTA = (window.turnaroundAreas || []).find(a =>
-                            a.trackIds.some(tid => _curTids.includes(String(tid)))
-                        );
-                        if (_inPlaceTA) {
-                            // Sitting on turnaround area -- reverse in place, then go to depot
-                            tr._turnaroundTarget = { areaId: _inPlaceTA.id, trackIds: _inPlaceTA.trackIds, approachPath: [] };
-                            tr._terminalTurnaround = false;
-                            tr._resumeDepotReturn = true;
+                            tr.dwellTimer = rv.targetStation.dwell || 30;
+                            if (!tr._stationArrived) {
+                                tr._stationArrived = true;
+                                tr.nextStationIdx++;
+                            }
                             tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
-                            tr.state = 'TURNAROUND_WAIT';
-                            tr._turnaroundWaitTimer = 5.0 + Math.random() * 3.0;
+                            tr._route = null; tr._routeKey = null; tr._pathCache = null;
                         } else {
-                            // Check for a forward turnaround area to drive into first
-                            let _fwdTA = _lastSeg
-                                ? window.findTurnaroundArea(g, _lastSeg.toNode, _lastSeg.track.id, tr.trainLength)
-                                : null;
-                            if (_fwdTA) {
-                                tr._turnaroundTarget = _fwdTA;
-                                tr._terminalTurnaround = false;
-                                tr._resumeDepotReturn = true;
-                                tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
-                                tr.state = 'TURNAROUND_APPROACH';
-                            } else {
-                                // No turnaround needed -- go straight to depot
+                            // Reverse speed: proportional up to a cap (~10 km/h), minimum creep
+                            let reverseSpeed = Math.min(err * 0.5, 3.0); // m/s
+                            reverseSpeed = Math.max(reverseSpeed, 0.3);
+                            // Move backward (decrease headDist), never below history start
+                            let _minHead = tr.history.length > 0 ? tr.history[0].startDist + tr.trainLength : 0;
+                            tr.headDist = Math.max(tr.headDist - reverseSpeed * dtSec, _minHead);
+                            tr.speed = 0; // reported speed shown as 0 while reversing
+                        }
+                    }
+                }
+
+            } else if (tr.state === 'DWELLING') {
+                tr.dwellTimer -= dtSec;
+                // Count dwell time toward journey time for headway regulation
+                if (tr._slotTotal > 1) tr._journeyTime = (tr._journeyTime || 0) + dtSec;
+                if (tr.dwellTimer <= 0) {
+                    tr._stationArrived = false; // reset arrival guard for next stop
+                    let stations = lObj[tr.dirPhase].stations;
+                    if (tr.nextStationIdx >= stations.length) {
+                        // ── Reached the terminal station ──────────────────────────
+                        if (tr.returningToDepot) {
+                            // Plan the return to depot from the train's CURRENT position
+                            // (where it stopped at the last platform), NOT from any
+                            // look-ahead segments pre-loaded by extendTrainHistory.
+                            // Always trim look-ahead first so path planning starts clean.
+                            tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
+                            tr._route = null; tr._routeKey = null; tr._pathCache = null;
+
+                            // Find the segment the head is actually on right now.
+                            let _hdSeg = null;
+                            for (let i = tr.history.length - 1; i >= 0; i--) {
+                                if (tr.history[i].startDist <= tr.headDist) { _hdSeg = tr.history[i]; break; }
+                            }
+                            let _lastSeg = _hdSeg || tr.history[tr.history.length - 1];
+
+                            // Find home depot tracks to check reachability.
+                            let _homeDepot = window.depots.find(d => d.id === tr.depotId)
+                                || window.depots.find(d => !d.line || (lObj && (d.line.includes(lObj.name) || d.line === '')));
+                            let _depotIds = _homeDepot ? (_homeDepot.tracks || []).map(String) : [];
+
+                            // ── Step 1: Can we reach the depot directly from here? ──
+                            // Try with the incoming-track filter first (no U-turn on same track),
+                            // then without (allow sharp turns). If either succeeds, no reversal needed.
+                            let _depotReachable = false;
+                            if (_lastSeg && _depotIds.length > 0) {
+                                _depotReachable = !!(
+                                    window.computeFullPath(g, _lastSeg.toNode, _depotIds, _lastSeg.track.id, false) ||
+                                    window.computeFullPath(g, _lastSeg.toNode, _depotIds, _lastSeg.track.id, true) ||
+                                    window.computeFullPath(g, _lastSeg.toNode, _depotIds, null, false) ||
+                                    window.computeFullPath(g, _lastSeg.toNode, _depotIds, null, true)
+                                );
+                            }
+
+                            if (_depotReachable) {
+                                // Depot reachable from current heading — go directly, no turnaround.
                                 tr.state = 'RETURNING_TO_DEPOT';
                                 tr._depotReturnAttempts = 0;
-                            }
-                        }
-                    } else {
-                        let newDir = tr.dirPhase === 'inbound' ? 'outbound' : 'inbound';
-                        let newStations = lObj[newDir].stations;
-
-                        if (!newStations || newStations.length === 0) {
-                            // No return route defined — just flip phase and restart
-                            tr.dirPhase = newDir;
-                            tr.nextStationIdx = 0;
-                            tr.state = 'DRIVING';
-                        } else {
-                            // ── Determine whether a physical turnaround is needed ──
-                            //
-                            // A turnaround is NOT needed when the train is already
-                            // positioned and oriented to drive directly toward the
-                            // first station of the new direction.
-                            //
-                            // We check this by asking the graph: from the node the
-                            // train's head is currently approaching (toNode of the
-                            // last history seg), can we reach newStations[0] WITHOUT
-                            // reversing?  If yes — no turnaround.
-                            //
-                            // "Shared terminus" (same track is both last inbound and
-                            // first outbound station) is the simplest case, but we
-                            // also handle cases where the terminal loop / runround
-                            // means the train is already facing the right way.
-
-                            // Find the history segment that actually contains the head
-                            // (not the last look-ahead seg, which may be far ahead).
-                            let headContainingSeg = null;
-                            for (let i = tr.history.length - 1; i >= 0; i--) {
-                                let h = tr.history[i];
-                                if (h.startDist <= tr.headDist) { headContainingSeg = h; break; }
-                            }
-                            let lastSeg = headContainingSeg || tr.history[tr.history.length - 1];
-                            let newFirstTids = newStations[0].trackIds.map(String);
-
-                            // Collect all platform track ids the train is currently on
-                            let curPlatTids = stations[stations.length - 1]
-                                ? stations[stations.length - 1].trackIds.map(String)
-                                : [];
-
-                            // Is the current terminal platform the same as the new
-                            // direction's first platform?  (shared terminus)
-                            let sharedTerminus = newFirstTids.some(id => curPlatTids.includes(id));
-
-                            // Can the train reach newStations[0] from its current
-                            // exit node WITHOUT a U-turn, sharp turn, OR traversal
-                            // through a player-defined turnaround area?
-                            //
-                            // If the only path to newStations[0] goes through a
-                            // turnaround area, the train must use TURNAROUND first
-                            // (flip dirPhase), then drive through the area in the
-                            // correct direction on the return leg.  Allowing such a
-                            // path here causes the train to drive forward through the
-                            // loop without a direction flip and emerge going the wrong
-                            // way, or to do a sharp turn instead of using the loop.
-                            let forwardReachable = false;
-                            if (lastSeg) {
-                                let exitNode = lastSeg.toNode;
-                                let incomingTid = lastSeg.track.id;
-                                let tAreaIds = new Set(
-                                    (window.turnaroundAreas || []).flatMap(a => a.trackIds.map(String))
-                                );
-                                let fwdPath = window.computeFullPath(g, exitNode, newFirstTids, incomingTid, false);
-                                if (fwdPath) {
-                                    // Reject if path uses any turnaround area track
-                                    let usesTA = fwdPath.some(step => tAreaIds.has(String(step.trackId)));
-                                    if (!usesTA) forwardReachable = true;
-                                }
-                            }
-
-                            if (sharedTerminus || forwardReachable) {
-                                // No physical reversal — already pointing the right way.
-                                // Just flip the direction phase.
-                                // If the terminal is shared, skip station index 0
-                                // (we're already there); otherwise start from 0.
-                                tr.dirPhase = newDir;
-                                tr.nextStationIdx = sharedTerminus ? 1 : 0;
-                                // Trim look-ahead history beyond current head so
-                                // extendTrainHistory re-paths toward the new target
-                                tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
-                                // Short cooldown so the departure node isn't treated as a same-track U-turn.
-                                // We do NOT set allowSharpTurns via cooldown here — that causes impossible
-                                // sharp turns.  Instead we only suppress the incoming-track check.
-                                tr._turnaroundCooldown = 3.0;
-                                tr.state = 'DRIVING';
                             } else {
-                                // Physical reversal needed at terminal.
-                                //
-                                // Case 1 — IN-PLATFORM TURNAROUND:
-                                // The train may already be sitting on a turnaround area
-                                // (e.g. the terminal platform track IS a designated
-                                // turnaround stub).  In that case there is nothing to
-                                // approach — skip straight to TURNAROUND_WAIT so the
-                                // train reverses in place without trying to drive into
-                                // an area it is already occupying.
-                                let currentTrackIds = tr.history
+                                // Depot NOT reachable from current heading — need to reverse first.
+                                // Check if currently sitting on a turnaround area (reverse in-place).
+                                let _curTids = tr.history
                                     .filter(h => h.track && h.startDist < tr.headDist && h.endDist > tr.headDist - tr.trainLength)
                                     .map(h => h.track.id.toString());
-                                let inPlaceTA = (window.turnaroundAreas || []).find(a =>
-                                    a.trackIds.some(tid => currentTrackIds.includes(String(tid)))
+                                let _inPlaceTA = (window.turnaroundAreas || []).find(a =>
+                                    a.trackIds.some(tid => _curTids.includes(String(tid)))
                                 );
-
-                                if (inPlaceTA) {
+                                if (_inPlaceTA) {
                                     // Already on the turnaround area — reverse immediately.
-                                    tr._turnaroundTarget = { areaId: inPlaceTA.id, trackIds: inPlaceTA.trackIds, approachPath: [] };
-                                    tr._terminalTurnaround = true; // TURNAROUND_REVERSE must flip dirPhase
-                                    tr._pendingNewDir = newDir;
-                                    tr._pendingNextStationIdx = 0;
-                                    tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
+                                    tr._turnaroundTarget = { areaId: _inPlaceTA.id, trackIds: _inPlaceTA.trackIds, approachPath: [] };
+                                    tr._terminalTurnaround = false;
+                                    tr._resumeDepotReturn = true;
                                     tr.state = 'TURNAROUND_WAIT';
                                     tr._turnaroundWaitTimer = 5.0 + Math.random() * 3.0;
                                 } else {
-                                    // Case 2 — FORWARD TURNAROUND AREA:
-                                    // Check if there is a turnaround area the train must
-                                    // drive INTO before reversing (area is ahead of the
-                                    // current head position).
-                                    let forwardTA = null;
-                                    if (lastSeg) {
-                                        forwardTA = window.findTurnaroundArea(
-                                            g, lastSeg.toNode, lastSeg.track.id, tr.trainLength);
+                                    // Drive forward into a turnaround area, then reverse.
+                                    let _fwdTA = _lastSeg
+                                        ? window.findTurnaroundArea(g, _lastSeg.toNode, _lastSeg.track.id, tr.trainLength)
+                                        : null;
+                                    if (_fwdTA) {
+                                        tr._turnaroundTarget = _fwdTA;
+                                        tr._terminalTurnaround = false;
+                                        tr._resumeDepotReturn = true;
+                                        tr.state = 'TURNAROUND_APPROACH';
+                                    } else {
+                                        // No turnaround area found — go to RETURNING_TO_DEPOT anyway;
+                                        // _extendTowardDepot will handle re-traversal or get stuck.
+                                        tr.state = 'RETURNING_TO_DEPOT';
+                                        tr._depotReturnAttempts = 0;
                                     }
-                                    if (forwardTA) {
-                                        // Drive forward into the turnaround area, THEN reverse.
-                                        // Keep dirPhase as-is; TURNAROUND_REVERSE will flip it.
-                                        tr._turnaroundTarget = forwardTA;
+                                }
+                            }
+                        } else {
+                            let newDir = tr.dirPhase === 'inbound' ? 'outbound' : 'inbound';
+                            let newStations = lObj[newDir].stations;
+
+                            if (!newStations || newStations.length === 0) {
+                                // No return route defined — just flip phase and restart
+                                tr.dirPhase = newDir;
+                                tr.nextStationIdx = 0;
+                                tr._route = null; tr._routeKey = null; tr._pathCache = null;
+                                tr.state = 'DRIVING';
+                            } else {
+                                // ── Determine whether a physical turnaround is needed ──
+                                //
+                                // A turnaround is NOT needed when the train is already
+                                // positioned and oriented to drive directly toward the
+                                // first station of the new direction.
+                                //
+                                // We check this by asking the graph: from the node the
+                                // train's head is currently approaching (toNode of the
+                                // last history seg), can we reach newStations[0] WITHOUT
+                                // reversing?  If yes — no turnaround.
+                                //
+                                // "Shared terminus" (same track is both last inbound and
+                                // first outbound station) is the simplest case, but we
+                                // also handle cases where the terminal loop / runround
+                                // means the train is already facing the right way.
+
+                                // Find the history segment that actually contains the head
+                                // (not the last look-ahead seg, which may be far ahead).
+                                let headContainingSeg = null;
+                                for (let i = tr.history.length - 1; i >= 0; i--) {
+                                    let h = tr.history[i];
+                                    if (h.startDist <= tr.headDist) { headContainingSeg = h; break; }
+                                }
+                                let lastSeg = headContainingSeg || tr.history[tr.history.length - 1];
+                                let newFirstTids = newStations[0].trackIds.map(String);
+
+                                // Collect all platform track ids the train is currently on
+                                let curPlatTids = stations[stations.length - 1]
+                                    ? stations[stations.length - 1].trackIds.map(String)
+                                    : [];
+
+                                // Is the current terminal platform the same as the new
+                                // direction's first platform?  (shared terminus)
+                                let sharedTerminus = newFirstTids.some(id => curPlatTids.includes(id));
+
+                                // Can the train reach newStations[0] from its current
+                                // exit node WITHOUT a U-turn, sharp turn, OR traversal
+                                // through a player-defined turnaround area?
+                                //
+                                // If the only path to newStations[0] goes through a
+                                // turnaround area, the train must use TURNAROUND first
+                                // (flip dirPhase), then drive through the area in the
+                                // correct direction on the return leg.  Allowing such a
+                                // path here causes the train to drive forward through the
+                                // loop without a direction flip and emerge going the wrong
+                                // way, or to do a sharp turn instead of using the loop.
+                                let forwardReachable = false;
+                                // If current terminal platform is itself a turnaround area,
+                                // always require physical reversal — never skip it.
+                                let terminalTids = stations[stations.length - 1]
+                                    ? stations[stations.length - 1].trackIds.map(String) : [];
+                                let terminalIsTA = (window.turnaroundAreas || []).some(a =>
+                                    a.trackIds.some(tid => terminalTids.includes(String(tid))));
+
+                                if (!terminalIsTA && lastSeg) {
+                                    let exitNode = lastSeg.toNode;
+                                    let incomingTid = lastSeg.track.id;
+                                    let tAreaIds = new Set(
+                                        (window.turnaroundAreas || []).flatMap(a => a.trackIds.map(String))
+                                    );
+                                    let fwdPath = window.computeFullPath(g, exitNode, newFirstTids, incomingTid, false);
+                                    if (fwdPath) {
+                                        let usesTA = fwdPath.some(step => tAreaIds.has(String(step.trackId)));
+                                        if (!usesTA) forwardReachable = true;
+                                    }
+                                }
+
+                                if (sharedTerminus || forwardReachable) {
+                                    // No physical reversal — already pointing the right way.
+                                    // Just flip the direction phase.
+                                    // If the terminal is shared, skip station index 0
+                                    // (we're already there); otherwise start from 0.
+                                    tr.dirPhase = newDir;
+                                    tr.nextStationIdx = sharedTerminus ? 1 : 0;
+                                    // Trim look-ahead history beyond current head so
+                                    // extendTrainHistory re-paths toward the new target
+                                    tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
+                                    // Short cooldown so the departure node isn't treated as a same-track U-turn.
+                                    // We do NOT set allowSharpTurns via cooldown here — that causes impossible
+                                    // sharp turns.  Instead we only suppress the incoming-track check.
+                                    tr._turnaroundCooldown = 3.0;
+                                    tr.state = 'DRIVING';
+                                } else {
+                                    // Physical reversal needed at terminal.
+                                    //
+                                    // Case 1 — IN-PLATFORM TURNAROUND:
+                                    // The train may already be sitting on a turnaround area
+                                    // (e.g. the terminal platform track IS a designated
+                                    // turnaround stub).  In that case there is nothing to
+                                    // approach — skip straight to TURNAROUND_WAIT so the
+                                    // train reverses in place without trying to drive into
+                                    // an area it is already occupying.
+                                    let currentTrackIds = tr.history
+                                        .filter(h => h.track && h.startDist < tr.headDist && h.endDist > tr.headDist - tr.trainLength)
+                                        .map(h => h.track.id.toString());
+                                    let inPlaceTA = (window.turnaroundAreas || []).find(a =>
+                                        a.trackIds.some(tid => currentTrackIds.includes(String(tid)))
+                                    );
+
+                                    if (inPlaceTA) {
+                                        // Already on the turnaround area — reverse immediately.
+                                        tr._turnaroundTarget = { areaId: inPlaceTA.id, trackIds: inPlaceTA.trackIds, approachPath: [] };
+                                        tr._route = null; tr._routeKey = null; // clear route on new turnaround target
                                         tr._terminalTurnaround = true; // TURNAROUND_REVERSE must flip dirPhase
                                         tr._pendingNewDir = newDir;
                                         tr._pendingNextStationIdx = 0;
                                         tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
-                                        tr.state = 'TURNAROUND_APPROACH';
+                                        tr.state = 'TURNAROUND_WAIT';
+                                        tr._turnaroundWaitTimer = 5.0 + Math.random() * 3.0;
                                     } else {
-                                        // Case 3 — No turnaround area found at all.
-                                        // Immediate in-place flip; extendTrainHistory may
-                                        // discover a behind-terminal area on the next tick.
-                                        tr.state = 'TURNAROUND';
+                                        // Case 2 — FORWARD TURNAROUND AREA:
+                                        // Check if there is a turnaround area the train must
+                                        // drive INTO before reversing (area is ahead of the
+                                        // current head position).
+                                        let forwardTA = null;
+                                        if (lastSeg) {
+                                            forwardTA = window.findTurnaroundArea(
+                                                g, lastSeg.toNode, lastSeg.track.id, tr.trainLength);
+                                        }
+                                        if (forwardTA) {
+                                            // Drive forward into the turnaround area, THEN reverse.
+                                            // Keep dirPhase as-is; TURNAROUND_REVERSE will flip it.
+                                            tr._turnaroundTarget = forwardTA;
+                                            tr._terminalTurnaround = true; // TURNAROUND_REVERSE must flip dirPhase
+                                            tr._pendingNewDir = newDir;
+                                            tr._pendingNextStationIdx = 0;
+                                            tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
+                                            tr.state = 'TURNAROUND_APPROACH';
+                                        } else {
+                                            // Case 3 — No turnaround area found at all.
+                                            // Immediate in-place flip; extendTrainHistory may
+                                            // discover a behind-terminal area on the next tick.
+                                            tr.state = 'TURNAROUND';
+                                        }
                                     }
                                 }
                             }
                         }
+                    } else {
+                        tr.state = 'DRIVING';
+                    }
+                }
+
+            } else if (tr.state === 'TURNAROUND_APPROACH') {
+                // Train is approaching a player-defined turnaround area.
+                // Treated exactly like a platform: brake to stop inside the area,
+                // then reverse direction.
+                let ta = tr._turnaroundTarget;
+                if (!ta) { tr.state = 'DRIVING'; return; }
+
+                // Extend history toward the turnaround area
+                window.extendTrainHistory(tr, g, { trackIds: ta.trackIds });
+
+                // Compute stop position inside turnaround area (same as platform)
+                let fakeStation = { trackIds: ta.trackIds };
+                let distToStop = window.computeDistToStop(tr, fakeStation, tr.history);
+
+                let trMaxSpeedMs = tr.maxSpeed / 3.6;
+                let currentSeg = tr.history[tr.history.length - 1];
+                let tLimit = currentSeg && currentSeg.track && currentSeg.track.speedLimit
+                    ? currentSeg.track.speedLimit / 3.6 : trMaxSpeedMs;
+                let speedCap = Math.min(trMaxSpeedMs, tLimit);
+
+                let requiredDecel = (distToStop > 0.01 && distToStop !== Infinity)
+                    ? (tr.speed * tr.speed) / (2 * Math.max(distToStop, 0.1)) : 0;
+                let idealBrakeSpeed = (distToStop > 0 && distToStop !== Infinity)
+                    ? Math.sqrt(2 * tr.brake * distToStop) : 0;
+                let velError = tr.speed - idealBrakeSpeed;
+                let correctionDecel = (velError > 0) ? velError * 1.5 : 0;
+                let demandedDecel = Math.min(requiredDecel + correctionDecel, tr.ebrake);
+
+                if (distToStop !== Infinity && requiredDecel >= tr.brake * 0.85) {
+                    // Braking
+                    if (distToStop <= 0.15) {
+                        tr.speed = 0;
+                    } else if (tr.speed === 0 && distToStop > 0.3) {
+                        tr.speed = Math.min(1.5, distToStop * 0.5);
+                    } else {
+                        tr.speed -= demandedDecel * dtSec;
+                        if (tr.speed < 0) tr.speed = 0;
+                        if (tr.speed < 0.2 && distToStop > 1.0) tr.speed = Math.min(0.5, distToStop * 0.3);
                     }
                 } else {
-                    tr.state = 'DRIVING';
+                    tr.speed += tr.accel * dtSec;
+                    if (tr.speed > speedCap) tr.speed = speedCap;
                 }
-            }
 
-        } else if (tr.state === 'TURNAROUND_APPROACH') {
-            // Train is approaching a player-defined turnaround area.
-            // Treated exactly like a platform: brake to stop inside the area,
-            // then reverse direction.
-            let ta = tr._turnaroundTarget;
-            if (!ta) { tr.state = 'DRIVING'; return; }
-
-            // Extend history toward the turnaround area
-            window.extendTrainHistory(tr, g, { trackIds: ta.trackIds });
-
-            // Compute stop position inside turnaround area (same as platform)
-            let fakeStation = { trackIds: ta.trackIds };
-            let distToStop = window.computeDistToStop(tr, fakeStation, tr.history);
-
-            let trMaxSpeedMs = tr.maxSpeed / 3.6;
-            let currentSeg = tr.history[tr.history.length - 1];
-            let tLimit = currentSeg && currentSeg.track && currentSeg.track.speedLimit
-                ? currentSeg.track.speedLimit / 3.6 : trMaxSpeedMs;
-            let speedCap = Math.min(trMaxSpeedMs, tLimit);
-
-            let requiredDecel = (distToStop > 0.01 && distToStop !== Infinity)
-                ? (tr.speed * tr.speed) / (2 * Math.max(distToStop, 0.1)) : 0;
-            let idealBrakeSpeed = (distToStop > 0 && distToStop !== Infinity)
-                ? Math.sqrt(2 * tr.brake * distToStop) : 0;
-            let velError = tr.speed - idealBrakeSpeed;
-            let correctionDecel = (velError > 0) ? velError * 1.5 : 0;
-            let demandedDecel = Math.min(requiredDecel + correctionDecel, tr.ebrake);
-
-            if (distToStop !== Infinity && requiredDecel >= tr.brake * 0.85) {
-                // Braking
-                if (distToStop <= 0.15) {
-                    tr.speed = 0;
-                } else if (tr.speed === 0 && distToStop > 0.3) {
-                    tr.speed = Math.min(1.5, distToStop * 0.5);
-                } else {
-                    tr.speed -= demandedDecel * dtSec;
-                    if (tr.speed < 0) tr.speed = 0;
-                    if (tr.speed < 0.2 && distToStop > 1.0) tr.speed = Math.min(0.5, distToStop * 0.3);
+                // Missed-stop correction — only when platform IS visible in history
+                // and train is stopped short. Never apply when distToStop=Infinity
+                // (platform not yet loaded): that would cause forward creep that
+                // fights the Case-B/C transition check below and causes oscillation.
+                if (tr.speed === 0 && distToStop !== Infinity && distToStop > 0.5 && distToStop < 50) {
+                    tr.speed = Math.min(0.8, distToStop * 0.4);
                 }
-            } else {
-                tr.speed += tr.accel * dtSec;
-                if (tr.speed > speedCap) tr.speed = speedCap;
-            }
 
-            // Missed-stop correction
-            if (tr.speed === 0 && distToStop > 0.5 && distToStop < 50 && distToStop !== Infinity) {
-                tr.speed = Math.min(0.8, distToStop * 0.4);
-            }
+                // Cap movement to avoid overshooting the stop point at high sim speeds.
+                // When already stopped (speed=0) never bump headDist.
+                let maxStep = (distToStop !== Infinity && distToStop > 0)
+                    ? Math.min(tr.speed * dtSec, Math.max(distToStop, 0))
+                    : tr.speed * dtSec;
+                if (tr.speed <= 0) maxStep = 0;
+                tr.headDist += maxStep;
 
-            // Cap movement to avoid overshooting the stop point at high sim speeds
-            let maxStep = (distToStop !== Infinity && distToStop > 0)
-                ? Math.min(tr.speed * dtSec, Math.max(distToStop, 0))
-                : tr.speed * dtSec;
-            tr.headDist += maxStep;
+                // Memory cleanup
+                // Keep at least one segment before the tail so getPointOnHistory always works
+                while (tr.history.length > 2 && tr.headDist - tr.trainLength > tr.history[1].endDist) {
+                    tr.history.shift();
+                }
 
-            // Memory cleanup
-            while (tr.history.length > 1 && tr.headDist - tr.trainLength > tr.history[0].endDist) {
-                tr.history.shift();
-            }
+                // ── Turnaround arrival detection ────────────────────────────────
+                // We need to catch three cases:
+                //   A) Normal: distToStop reached ≤0.3 and speed ~0
+                //   B) Dead-end: head reached the end of the last segment inside area
+                //   C) High-speed overshoot: dtSec so large head jumped past stop;
+                //      distToStop may now be Infinity (area cleaned from history) but
+                //      lastSeg is still an area track at its very end.
+                //
+                // Unify: if the last history segment is an area track AND head is
+                // at/past its endDist, snap to endDist and transition.
+                // Also keep the normal distToStop ≤0.3 path.
+                let _taTransition = false;
+                let _lastSeg = tr.history[tr.history.length - 1];
 
-            // ── Turnaround arrival detection ────────────────────────────────
-            // We need to catch three cases:
-            //   A) Normal: distToStop reached ≤0.3 and speed ~0
-            //   B) Dead-end: head reached the end of the last segment inside area
-            //   C) High-speed overshoot: dtSec so large head jumped past stop;
-            //      distToStop may now be Infinity (area cleaned from history) but
-            //      lastSeg is still an area track at its very end.
-            //
-            // Unify: if the last history segment is an area track AND head is
-            // at/past its endDist, snap to endDist and transition.
-            // Also keep the normal distToStop ≤0.3 path.
-            let _taTransition = false;
-            let _lastSeg = tr.history[tr.history.length - 1];
+                // Case A – normal arrival
+                if (!_taTransition && distToStop <= 0.3) {
+                    let areaSegs = tr.history.filter(h => h.track && ta.trackIds.includes(h.track.id.toString()));
+                    if (areaSegs.length > 0) {
+                        let stopHeadDist = window.getPlatformStopHeadDist(tr, fakeStation, tr.history);
+                        if (stopHeadDist !== null) tr.headDist = stopHeadDist;
+                        tr.speed = 0;
+                        _taTransition = true;
+                    }
+                }
 
-            // Case A – normal arrival
-            if (!_taTransition && distToStop <= 0.3) {
-                let areaSegs = tr.history.filter(h => h.track && ta.trackIds.includes(h.track.id.toString()));
-                if (areaSegs.length > 0) {
-                    let stopHeadDist = window.getPlatformStopHeadDist(tr, fakeStation, tr.history);
-                    if (stopHeadDist !== null) tr.headDist = stopHeadDist;
+                // Case B/C – last seg is area track and head is at/past its end
+                // (covers dead-ends AND high-speed overshoot where distToStop=Infinity)
+                if (!_taTransition && _lastSeg && _lastSeg.track
+                    && ta.trackIds.includes(_lastSeg.track.id.toString())
+                    && tr.headDist >= _lastSeg.endDist - 0.5) {
+                    tr.headDist = _lastSeg.endDist; // snap to end of area
                     tr.speed = 0;
                     _taTransition = true;
                 }
-            }
 
-            // Case B/C – last seg is area track and head is at/past its end
-            // (covers dead-ends AND high-speed overshoot where distToStop=Infinity)
-            if (!_taTransition && _lastSeg && _lastSeg.track
-                && ta.trackIds.includes(_lastSeg.track.id.toString())
-                && tr.headDist >= _lastSeg.endDist - 0.5) {
-                tr.headDist = _lastSeg.endDist; // snap to end of area
+                // Case B/C fallback – speed already ~0 on any area seg
+                if (!_taTransition && tr.speed < 0.05 && _lastSeg && _lastSeg.track
+                    && ta.trackIds.includes(_lastSeg.track.id.toString())) {
+                    tr.speed = 0;
+                    _taTransition = true;
+                }
+
+                if (_taTransition) {
+                    tr.speed = 0;
+                    tr.state = 'TURNAROUND_WAIT';
+                    tr._turnaroundWaitTimer = 5.0 + Math.random() * 3.0; // 5–8 second realistic wait
+                }
+
+            } else if (tr.state === 'TURNAROUND_WAIT') {
+                // Waiting at turnaround area before reversing (realism pause)
+                tr._turnaroundWaitTimer = (tr._turnaroundWaitTimer || 0) - dtSec;
+                if (tr._turnaroundWaitTimer <= 0) {
+                    tr.state = 'TURNAROUND_REVERSE';
+                }
+
+            } else if (tr.state === 'TURNAROUND_REVERSE') {
+                // Train is fully stopped inside a player-defined turnaround area.
+                // Perform reversal then resume driving toward the next station.
+                let ok = window.performTurnaround(tr);
+                if (!ok) { tr.state = 'DESPAWNING'; return; }
+
                 tr.speed = 0;
-                _taTransition = true;
-            }
+                tr._turnaroundTarget = null;
+                tr._needsTurnaround = false;
+                tr._turnaroundCooldown = 3.0; // short cooldown: suppress same-track U-turn check only
+                tr._route = null; tr._routeKey = null; // force re-path in new direction
 
-            // Case B/C fallback – speed already ~0 on any area seg
-            if (!_taTransition && tr.speed < 0.05 && _lastSeg && _lastSeg.track
-                && ta.trackIds.includes(_lastSeg.track.id.toString())) {
-                tr.speed = 0;
-                _taTransition = true;
-            }
+                // If this reversal was initiated from a terminal dwell (DWELLING → TURNAROUND_APPROACH),
+                // flip dirPhase now that the physical reversal is done.
+                if (tr._terminalTurnaround) {
+                    tr.dirPhase = tr._pendingNewDir || (tr.dirPhase === 'inbound' ? 'outbound' : 'inbound');
+                    let pendingIdx = tr._pendingNextStationIdx !== undefined ? tr._pendingNextStationIdx : 0;
 
-            if (_taTransition) {
-                tr.speed = 0;
-                tr.state = 'TURNAROUND_WAIT';
-                tr._turnaroundWaitTimer = 5.0 + Math.random() * 3.0; // 5–8 second realistic wait
-            }
-
-        } else if (tr.state === 'TURNAROUND_WAIT') {
-            // Waiting at turnaround area before reversing (realism pause)
-            tr._turnaroundWaitTimer = (tr._turnaroundWaitTimer || 0) - dtSec;
-            if (tr._turnaroundWaitTimer <= 0) {
-                tr.state = 'TURNAROUND_REVERSE';
-            }
-
-        } else if (tr.state === 'TURNAROUND_REVERSE') {
-            // Train is fully stopped inside a player-defined turnaround area.
-            // Perform reversal then resume driving toward the next station.
-            let ok = window.performTurnaround(tr);
-            if (!ok) { tr.state = 'DESPAWNING'; return; }
-
-            tr.speed = 0;
-            tr._turnaroundTarget = null;
-            tr._needsTurnaround = false;
-            tr._turnaroundCooldown = 3.0; // short cooldown: suppress same-track U-turn check only
-
-            // If this reversal was initiated from a terminal dwell (DWELLING → TURNAROUND_APPROACH),
-            // flip dirPhase now that the physical reversal is done.
-            if (tr._terminalTurnaround) {
-                tr.dirPhase = tr._pendingNewDir || (tr.dirPhase === 'inbound' ? 'outbound' : 'inbound');
-                tr.nextStationIdx = tr._pendingNextStationIdx !== undefined ? tr._pendingNextStationIdx : 0;
-                tr._terminalTurnaround = false;
-                tr._pendingNewDir = null;
-                tr._pendingNextStationIdx = undefined;
-            }
-
-            // Verify a forward path now exists after reversal.
-            // Pass null as incomingTrackId: after a full reversal the train is
-            // travelling the same track in the opposite direction, so using the
-            // track id as "incoming" would cause the pathfinder to treat any
-            // departure as a same-track U-turn and return null spuriously.
-            let stations = lObj[tr.dirPhase].stations;
-            let targetStation = stations[tr.nextStationIdx];
-            if (targetStation) {
-                let lastSeg = tr.history[tr.history.length - 1];
-                if (lastSeg) {
-                    let testPath = window.computeFullPath(g, lastSeg.toNode, targetStation.trackIds, null, false);
-                    if (!testPath) {
-                        testPath = window.computeFullPath(g, lastSeg.toNode, targetStation.trackIds, null, true);
-                        if (!testPath) {
-                            console.warn('[SIM] TURNAROUND_REVERSE: still no path after reversal', tr.id);
-                            tr.state = 'DESPAWNING';
-                            return;
+                    // If station[pendingIdx] of the new direction is the turnaround area the
+                    // train is currently sitting on (platform == turnaround area), skip it.
+                    // Without this, extendTrainHistory sees the train on the target platform
+                    // and re-triggers the turnaround, causing an oscillation loop.
+                    if (pendingIdx === 0) {
+                        let newSts = lObj[tr.dirPhase] && lObj[tr.dirPhase].stations;
+                        if (newSts && newSts.length > 0) {
+                            let firstTids = newSts[0].trackIds.map(String);
+                            let bodyTids = tr.history
+                                .filter(h => h.track && h.endDist > tr.headDist - tr.trainLength && h.startDist <= tr.headDist)
+                                .map(h => h.track.id.toString());
+                            if (firstTids.some(id => bodyTids.includes(id))) pendingIdx = 1;
                         }
                     }
+
+                    tr.nextStationIdx = pendingIdx;
+                    tr._terminalTurnaround = false;
+                    tr._pendingNewDir = null;
+                    tr._pendingNextStationIdx = undefined;
                 }
-            }
 
-            tr.speed = 0;
-            tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
+                // After reversal, clear the route cache so extendTrainHistory
+                // recomputes the path from the new direction on the next DRIVING tick.
+                // Do NOT path-check here: after performTurnaround, lastSeg.toNode is
+                // the old head end (dead-end node) -- the train hasn't moved yet.
+                // extendTrainHistory will route correctly once physics advance one step.
+                tr._route = null; tr._routeKey = null; tr._pathCache = null;
+                tr._noPathLogged = false; tr._needsTurnaround = false;
+                // Prevent extendTrainHistory from re-triggering turnaround on the same
+                // area track the train just reversed on. Cleared once the train routes
+                // onto a track that is NOT part of any turnaround area.
+                tr._justReversed = true;
+                // Turnaround cooldown suppresses incoming-track U-turn check so the
+                // train can depart from the terminal node cleanly.
+                tr._turnaroundCooldown = 3.0;
 
-            // If this turnaround was needed while returning to depot, go back to that state.
-            if (tr._resumeDepotReturn) {
-                tr._resumeDepotReturn = false;
-                tr.state = 'RETURNING_TO_DEPOT';
-            } else {
+                tr.speed = 0;
+                tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
+
+                // If this turnaround was needed while returning to depot, go back to that state.
+                if (tr._resumeDepotReturn) {
+                    tr._resumeDepotReturn = false;
+                    tr.state = 'RETURNING_TO_DEPOT';
+                } else {
+                    tr.state = 'DRIVING';
+                }
+
+            } else if (tr.state === 'TURNAROUND_PREP') {
+                let ok = window.performTurnaround(tr);
+                if (!ok) { tr.state = 'DESPAWNING'; return; }
+
+                tr._needsTurnaround = false;
+                tr._turnaroundCooldown = 3.0; // short cooldown: suppress same-track check only
+
+                tr._route = null; tr._routeKey = null; tr._pathCache = null;
+                tr._noPathLogged = false; tr._needsTurnaround = false;
+                tr.speed = 0;
+                tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
+                tr.state = 'DRIVING';
+
+            } else if (tr.state === 'TURNAROUND') {
+                // Terminal direction flip when no forward turnaround area was found.
+                // Flip dirPhase and set a short cooldown so extendTrainHistory doesn't
+                // reject the first step as a same-track U-turn.
+                // On the next tick, extendTrainHistory may hit a dead-end, cancel the
+                // cooldown, find a behind-terminal turnaround area, and drive into it.
+
+                let newDir = tr.dirPhase === 'inbound' ? 'outbound' : 'inbound';
+                let newStations = lObj[newDir].stations;
+                if (!newStations || newStations.length === 0) {
+                    if (tr.returningToDepot) {
+                        tr.state = 'RETURNING_TO_DEPOT';
+                        tr._depotReturnAttempts = 0;
+                    } else {
+                        tr.state = 'DESPAWNING';
+                    }
+                    return;
+                }
+
+                tr.dirPhase = newDir;
+                tr.nextStationIdx = 0;
+                tr.speed = 0;
+                // Short cooldown: only suppresses the same-track incoming check so the train
+                // can depart from the terminal node without a false U-turn rejection.
+                // Do NOT use a long cooldown with allowSharpTurns — that causes impossible sharp turns.
+                tr._turnaroundCooldown = 3.0;
+                // Clear look-ahead so extendTrainHistory re-paths from current position
+                tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
                 tr.state = 'DRIVING';
             }
 
-        } else if (tr.state === 'TURNAROUND_PREP') {
-            let ok = window.performTurnaround(tr);
-            if (!ok) { tr.state = 'DESPAWNING'; return; }
+            // Extend train history toward depot tracks.
+            // Like extendTrainHistory but WITHOUT the loop-prevention guard, because a
+            // returning train must re-traverse tracks it already covered going the other way.
+            // Still respects sharp-turn rejection and routes through turnaround areas.
+            // =============================================================================
+            // RETURNING_TO_DEPOT: depot tracks treated exactly like a platform.
+            // Uses extendTrainHistory + computeDistToStop + the same physics as DRIVING.
+            // Despawns instead of dwelling when stopped at the depot stop point.
+            // The train can stop on ANY of the depot's tracks (whichever is reachable first).
+            // =============================================================================
+            if (tr.state === 'RETURNING_TO_DEPOT') {
+                // Find home depot or any depot serving this line
+                let homeDepot = window.depots.find(d => d.id === tr.depotId);
+                if (!homeDepot) homeDepot = window.depots.find(d => !d.line || (lObj && (d.line.includes(lObj.name) || d.line === '')));
+                if (!homeDepot || !homeDepot.tracks || homeDepot.tracks.length === 0) { tr.state = 'DESPAWNING'; return; }
 
-            tr._needsTurnaround = false;
-            tr._turnaroundCooldown = 3.0; // short cooldown: suppress same-track check only
+                // Accept any depot track as the stop target — just like a multi-track platform.
+                // Prefer a free (unoccupied) track, fall back to any if all busy.
+                // IMPORTANT: once a depot track is already in history (train committed to it),
+                // never switch target — switching causes computeDistToStop to flip to Infinity
+                // on the tick the track enters history (isDepotTrackOccupied sees the train itself),
+                // which makes effectiveTarget jump to Infinity and the train re-accelerates.
+                let allDepotIds = homeDepot.tracks.map(String);
+                let alreadyCommitted = allDepotIds.filter(tid =>
+                    tr.history.some(h => h.track && h.track.id.toString() === tid)
+                );
+                let targetDepotIds;
+                if (alreadyCommitted.length > 0) {
+                    targetDepotIds = alreadyCommitted; // locked — don't change mid-approach
+                } else {
+                    let freeDepotIds = allDepotIds.filter(tid => {
+                        let t = window.tracks.find(x => x.id.toString() === tid);
+                        return t && !window.isDepotTrackOccupied(t);
+                    });
+                    targetDepotIds = freeDepotIds.length > 0 ? freeDepotIds : allDepotIds;
+                }
+                let depotStation = { trackIds: targetDepotIds };
 
-            let stations = lObj[tr.dirPhase].stations;
-            let targetStation = stations[tr.nextStationIdx];
-            if (targetStation) {
-                let lastSeg = tr.history[tr.history.length - 1];
-                if (lastSeg) {
-                    // Use null as incomingTrackId: after reversal the same track id
-                    // would be seen as a U-turn by the pathfinder, causing false null.
-                    let testPath = window.computeFullPath(g, lastSeg.toNode, targetStation.trackIds, null, true);
-                    if (!testPath) {
-                        console.warn('[SIM] TURNAROUND_PREP: still no path after reversal, despawning', tr.id);
-                        tr.state = 'DESPAWNING';
+                // Extend history toward depot using the depot-specific path extension.
+                // Unlike extendTrainHistory, _extendTowardDepot allows re-traversal of
+                // tracks already in history (returning trains must go back the way they came).
+                _extendTowardDepot(tr, g, depotStation);
+
+                // If _extendTowardDepot found a turnaround area en route, only hand off
+                // if the depot is genuinely unreachable without reversing. A returning
+                // train has already re-oriented; a spurious turnaround would flip it 180°
+                // and send it back toward the terminal.
+                if (tr._turnaroundTarget && tr.state !== 'TURNAROUND_APPROACH') {
+                    let _lastTA = tr.history[tr.history.length - 1];
+                    let _depotReachable = _lastTA && (
+                        window.computeFullPath(g, _lastTA.toNode, targetDepotIds, _lastTA.track && _lastTA.track.id, true) ||
+                        window.computeFullPath(g, _lastTA.toNode, targetDepotIds, null, true)
+                    );
+                    if (_depotReachable) {
+                        // Depot reachable — turnaround was spurious; discard it.
+                        tr._turnaroundTarget = null;
+                        tr._needsTurnaround = false;
+                        tr._turnaroundCooldown = 0;
+                    } else {
+                        tr._pendingNewDir = null;
+                        tr._terminalTurnaround = false;
+                        tr._resumeDepotReturn = true;
+                        tr.state = 'TURNAROUND_APPROACH';
                         return;
                     }
                 }
-            }
-            tr.speed = 0;
-            tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
-            tr.state = 'DRIVING';
 
-        } else if (tr.state === 'TURNAROUND') {
-            // Terminal direction flip when no forward turnaround area was found.
-            // Flip dirPhase and set a short cooldown so extendTrainHistory doesn't
-            // reject the first step as a same-track U-turn.
-            // On the next tick, extendTrainHistory may hit a dead-end, cancel the
-            // cooldown, find a behind-terminal turnaround area, and drive into it.
-
-            let newDir = tr.dirPhase === 'inbound' ? 'outbound' : 'inbound';
-            let newStations = lObj[newDir].stations;
-            if (!newStations || newStations.length === 0) {
-                if (tr.returningToDepot) {
-                    tr.state = 'RETURNING_TO_DEPOT';
-                    tr._depotReturnAttempts = 0;
-                } else {
-                    tr.state = 'DESPAWNING';
+                // --- Physics: same as the DRIVING block ---
+                // computeDistToStop returns Infinity until the head is inside a depot track.
+                // Before entry, scan look-ahead history for the first upcoming depot seg and
+                // compute the kinematic stop point from outside so braking starts in time.
+                let distToDepot = window.computeDistToStop(tr, depotStation, tr.history);
+                if (distToDepot === Infinity) {
+                    // Find the first depot seg that's ahead of the current head
+                    for (let h of tr.history) {
+                        if (h.startDist <= tr.headDist) continue;
+                        if (!targetDepotIds.includes(h.track.id.toString())) continue;
+                        // Use only this specific depot track's length for the stop estimate
+                        let trackLen = h.track.length;
+                        let stopHd = h.startDist + trackLen / 2 + tr.trainLength / 2;
+                        stopHd = Math.max(h.startDist + 1, Math.min(h.startDist + trackLen, stopHd));
+                        distToDepot = stopHd - tr.headDist;
+                        break;
+                    }
                 }
-                return;
-            }
+                let trMaxSpeedMs = tr.maxSpeed / 3.6;
+                let headSeg = null;
+                for (let i = 0; i < tr.history.length; i++) {
+                    let h = tr.history[i];
+                    let isLast = i === tr.history.length - 1;
+                    if (tr.headDist >= h.startDist && (isLast ? tr.headDist <= h.endDist : tr.headDist < h.endDist)) {
+                        headSeg = h; break;
+                    }
+                }
+                let speedCap = headSeg && headSeg.track.speedLimit
+                    ? Math.min(trMaxSpeedMs, headSeg.track.speedLimit / 3.6)
+                    : trMaxSpeedMs;
 
-            tr.dirPhase = newDir;
-            tr.nextStationIdx = 0;
-            tr.speed = 0;
-            // Short cooldown: only suppresses the same-track incoming check so the train
-            // can depart from the terminal node without a false U-turn rejection.
-            // Do NOT use a long cooldown with allowSharpTurns — that causes impossible sharp turns.
-            tr._turnaroundCooldown = 3.0;
-            // Clear look-ahead so extendTrainHistory re-paths from current position
-            tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
-            tr.state = 'DRIVING';
-        }
-
-        // Extend train history toward depot tracks.
-        // Like extendTrainHistory but WITHOUT the loop-prevention guard, because a
-        // returning train must re-traverse tracks it already covered going the other way.
-        // Still respects sharp-turn rejection and routes through turnaround areas.
-        // =============================================================================
-        // RETURNING_TO_DEPOT: depot tracks treated exactly like a platform.
-        // Uses extendTrainHistory + computeDistToStop + the same physics as DRIVING.
-        // Despawns instead of dwelling when stopped at the depot stop point.
-        // The train can stop on ANY of the depot's tracks (whichever is reachable first).
-        // =============================================================================
-        if (tr.state === 'RETURNING_TO_DEPOT') {
-            // Find home depot or any depot serving this line
-            let homeDepot = window.depots.find(d => d.id === tr.depotId);
-            if (!homeDepot) homeDepot = window.depots.find(d => !d.line || (lObj && (d.line.includes(lObj.name) || d.line === '')));
-            if (!homeDepot || !homeDepot.tracks || homeDepot.tracks.length === 0) { tr.state = 'DESPAWNING'; return; }
-
-            // Accept any depot track as the stop target — just like a multi-track platform.
-            // Prefer a free (unoccupied) track, fall back to any if all busy.
-            // IMPORTANT: once a depot track is already in history (train committed to it),
-            // never switch target — switching causes computeDistToStop to flip to Infinity
-            // on the tick the track enters history (isDepotTrackOccupied sees the train itself),
-            // which makes effectiveTarget jump to Infinity and the train re-accelerates.
-            let allDepotIds = homeDepot.tracks.map(String);
-            let alreadyCommitted = allDepotIds.filter(tid =>
-                tr.history.some(h => h.track && h.track.id.toString() === tid)
-            );
-            let targetDepotIds;
-            if (alreadyCommitted.length > 0) {
-                targetDepotIds = alreadyCommitted; // locked — don't change mid-approach
-            } else {
-                let freeDepotIds = allDepotIds.filter(tid => {
-                    let t = window.tracks.find(x => x.id.toString() === tid);
-                    return t && !window.isDepotTrackOccupied(t);
-                });
-                targetDepotIds = freeDepotIds.length > 0 ? freeDepotIds : allDepotIds;
-            }
-            let depotStation = { trackIds: targetDepotIds };
-
-            // Extend history toward depot using the depot-specific path extension.
-            // Unlike extendTrainHistory, _extendTowardDepot allows re-traversal of
-            // tracks already in history (returning trains must go back the way they came).
-            _extendTowardDepot(tr, g, depotStation);
-
-            // If _extendTowardDepot found a turnaround area en route, hand off.
-            // _resumeDepotReturn tells TURNAROUND_REVERSE to return here afterward.
-            if (tr._turnaroundTarget && tr.state !== 'TURNAROUND_APPROACH') {
-                tr._pendingNewDir = null;
-                tr._terminalTurnaround = false;
-                tr._resumeDepotReturn = true;
-                tr.state = 'TURNAROUND_APPROACH';
-                return;
-            }
-
-            // --- Physics: same as the DRIVING block ---
-            // computeDistToStop returns Infinity until the head is inside a depot track.
-            // Before entry, scan look-ahead history for the first upcoming depot seg and
-            // compute the kinematic stop point from outside so braking starts in time.
-            let distToDepot = window.computeDistToStop(tr, depotStation, tr.history);
-            if (distToDepot === Infinity) {
-                // Find the first depot seg that's ahead of the current head
+                // Look-ahead speed limit enforcement
                 for (let h of tr.history) {
                     if (h.startDist <= tr.headDist) continue;
-                    if (!targetDepotIds.includes(h.track.id.toString())) continue;
-                    // Use only this specific depot track's length for the stop estimate
-                    let trackLen = h.track.length;
-                    let stopHd = h.startDist + trackLen / 2 + tr.trainLength / 2;
-                    stopHd = Math.max(h.startDist + 1, Math.min(h.startDist + trackLen, stopHd));
-                    distToDepot = stopHd - tr.headDist;
-                    break;
+                    let hLim = h.track.speedLimit ? h.track.speedLimit / 3.6 : trMaxSpeedMs;
+                    if (hLim >= speedCap) continue;
+                    let maxNow = Math.sqrt(hLim * hLim + 2 * tr.brake * (h.startDist - tr.headDist));
+                    if (maxNow < speedCap) speedCap = maxNow;
                 }
-            }
-            let trMaxSpeedMs = tr.maxSpeed / 3.6;
-            let headSeg = null;
-            for (let i = 0; i < tr.history.length; i++) {
-                let h = tr.history[i];
-                let isLast = i === tr.history.length - 1;
-                if (tr.headDist >= h.startDist && (isLast ? tr.headDist <= h.endDist : tr.headDist < h.endDist)) {
-                    headSeg = h; break;
+
+                // Kinematic braking curve toward depot stop (identical to station approach)
+                let hasStop = distToDepot !== Infinity;
+                let idealStopSpeed = hasStop
+                    ? Math.sqrt(2 * tr.brake * Math.max(distToDepot, 0))
+                    : Infinity;
+                let effectiveTarget = Math.min(speedCap, idealStopSpeed);
+
+                let requiredDecel = hasStop && distToDepot > 0.1
+                    ? (tr.speed * tr.speed) / (2 * Math.max(distToDepot, 0.1)) : 0;
+
+                if (tr.speed < effectiveTarget - 0.05) {
+                    tr.speed += tr.accel * dtSec;
+                    if (tr.speed > effectiveTarget) tr.speed = effectiveTarget;
+                } else if (tr.speed > effectiveTarget + 0.05) {
+                    let decel = Math.min(requiredDecel + (tr.speed - effectiveTarget) * 1.5, tr.ebrake);
+                    decel = Math.max(decel, tr.brake * 0.1);
+                    tr.speed -= decel * dtSec;
+                    if (tr.speed < 0) tr.speed = 0;
+                } else {
+                    tr.speed = Math.max(0, effectiveTarget);
                 }
-            }
-            let speedCap = headSeg && headSeg.track.speedLimit
-                ? Math.min(trMaxSpeedMs, headSeg.track.speedLimit / 3.6)
-                : trMaxSpeedMs;
 
-            // Look-ahead speed limit enforcement
-            for (let h of tr.history) {
-                if (h.startDist <= tr.headDist) continue;
-                let hLim = h.track.speedLimit ? h.track.speedLimit / 3.6 : trMaxSpeedMs;
-                if (hLim >= speedCap) continue;
-                let maxNow = Math.sqrt(hLim * hLim + 2 * tr.brake * (h.startDist - tr.headDist));
-                if (maxNow < speedCap) speedCap = maxNow;
-            }
+                tr.headDist += tr.speed * dtSec;
+                while (tr.history.length > 2 && tr.headDist - tr.trainLength > tr.history[1].endDist) tr.history.shift();
 
-            // Kinematic braking curve toward depot stop (identical to station approach)
-            let hasStop = distToDepot !== Infinity;
-            let idealStopSpeed = hasStop
-                ? Math.sqrt(2 * tr.brake * Math.max(distToDepot, 0))
-                : Infinity;
-            let effectiveTarget = Math.min(speedCap, idealStopSpeed);
-
-            let requiredDecel = hasStop && distToDepot > 0.1
-                ? (tr.speed * tr.speed) / (2 * Math.max(distToDepot, 0.1)) : 0;
-
-            if (tr.speed < effectiveTarget - 0.05) {
-                tr.speed += tr.accel * dtSec;
-                if (tr.speed > effectiveTarget) tr.speed = effectiveTarget;
-            } else if (tr.speed > effectiveTarget + 0.05) {
-                let decel = Math.min(requiredDecel + (tr.speed - effectiveTarget) * 1.5, tr.ebrake);
-                decel = Math.max(decel, tr.brake * 0.1);
-                tr.speed -= decel * dtSec;
-                if (tr.speed < 0) tr.speed = 0;
-            } else {
-                tr.speed = Math.max(0, effectiveTarget);
-            }
-
-            tr.headDist += tr.speed * dtSec;
-            while (tr.history.length > 1 && tr.headDist - tr.trainLength > tr.history[0].endDist) tr.history.shift();
-
-            // Arrived: stopped within 1 m of the computed depot stop point → despawn
-            if (hasStop && tr.speed < 0.05) {
-                let stopHd = window.getPlatformStopHeadDist(tr, depotStation, tr.history);
-                if (stopHd !== null && Math.abs(tr.headDist - stopHd) <= 1.0) {
-                    tr.speed = 0; tr.state = 'DESPAWNING'; return;
+                // Arrived: stopped within 1 m of the computed depot stop point → despawn
+                if (hasStop && tr.speed < 0.05) {
+                    let stopHd = window.getPlatformStopHeadDist(tr, depotStation, tr.history);
+                    if (stopHd !== null && Math.abs(tr.headDist - stopHd) <= 1.0) {
+                        tr.speed = 0; tr.state = 'DESPAWNING'; return;
+                    }
                 }
-            }
-            // Fallback: head physically on a depot track and stopped → despawn
-            if (tr.speed < 0.05) {
-                let onDepot = tr.history.some(h =>
-                    h.track && targetDepotIds.includes(h.track.id.toString()) &&
-                    h.startDist <= tr.headDist && tr.headDist <= h.endDist + 1
-                );
-                if (onDepot) { tr.speed = 0; tr.state = 'DESPAWNING'; return; }
+                // Fallback: head physically on a depot track and stopped → despawn
+                if (tr.speed < 0.05) {
+                    let onDepot = tr.history.some(h =>
+                        h.track && targetDepotIds.includes(h.track.id.toString()) &&
+                        h.startDist <= tr.headDist && tr.headDist <= h.endDist + 1
+                    );
+                    if (onDepot) { tr.speed = 0; tr.state = 'DESPAWNING'; return; }
+                }
+
+                // Failsafe: stuck with no path for too long → despawn
+                if (!hasStop && tr.speed < 0.01) {
+                    tr._depotReturnAttempts = (tr._depotReturnAttempts || 0) + 1;
+                    if (tr._depotReturnAttempts > 600) {
+                        console.warn('[SIM] Train', tr.id, 'cannot reach depot — despawning');
+                        tr.state = 'DESPAWNING'; return;
+                    }
+                } else { tr._depotReturnAttempts = 0; }
+
+                if (window.selectedTrain && window.selectedTrain.id === tr.id) {
+                    document.getElementById('train-info-speed').innerText = Math.round(tr.speed * 3.6);
+                    document.getElementById('train-info-state').innerText = 'RETURNING_TO_DEPOT';
+                    document.getElementById('train-info-next').innerText = 'Depot';
+                    if (lObj) document.getElementById('train-info-line').innerText = lObj.name;
+                }
+                return;
             }
 
-            // Failsafe: stuck with no path for too long → despawn
-            if (!hasStop && tr.speed < 0.01) {
-                tr._depotReturnAttempts = (tr._depotReturnAttempts || 0) + 1;
-                if (tr._depotReturnAttempts > 600) {
-                    console.warn('[SIM] Train', tr.id, 'cannot reach depot — despawning');
-                    tr.state = 'DESPAWNING'; return;
-                }
-            } else { tr._depotReturnAttempts = 0; }
 
             if (window.selectedTrain && window.selectedTrain.id === tr.id) {
                 document.getElementById('train-info-speed').innerText = Math.round(tr.speed * 3.6);
-                document.getElementById('train-info-state').innerText = 'RETURNING_TO_DEPOT';
-                document.getElementById('train-info-next').innerText = 'Depot';
+                document.getElementById('train-info-state').innerText = tr.state + (tr.returningToDepot ? ' [→Depot]' : '');
+                (function () {
+                    let _stations2 = lObj[tr.dirPhase].stations;
+                    let _st2 = _stations2 && _stations2[tr.nextStationIdx];
+                    let _stName = 'Station ' + (tr.nextStationIdx + 1);
+                    if (_st2 && _st2.trackIds && window.platformBoundaries) {
+                        let _sids = [..._st2.trackIds].sort().join(',');
+                        let _bnd = window.platformBoundaries.find(b => b.pathId === _sids);
+                        if (_bnd && _bnd.stationName) _stName = _bnd.stationName;
+                        else if (_bnd && _bnd.platformNumber) _stName = 'Plat ' + _bnd.platformNumber;
+                    }
+                    document.getElementById('train-info-next').innerText = _stName;
+                })()
                 if (lObj) document.getElementById('train-info-line').innerText = lObj.name;
             }
-            return;
-        }
+        });
 
+    } // end while (remainingSim > 0)
 
-        if (window.selectedTrain && window.selectedTrain.id === tr.id) {
-            document.getElementById('train-info-speed').innerText = Math.round(tr.speed * 3.6);
-            document.getElementById('train-info-state').innerText = tr.state + (tr.returningToDepot ? ' [→Depot]' : '');
-            document.getElementById('train-info-next').innerText = `Station ${tr.nextStationIdx + 1}`;
-            if (lObj) document.getElementById('train-info-line').innerText = lObj.name;
-        }
-    });
-
+    // Despawn at end of frame (not per sub-step) to avoid double-processing
     window.trains = window.trains.filter(t => t.state !== 'DESPAWNING');
 };
 
