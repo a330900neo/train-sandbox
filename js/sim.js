@@ -1503,6 +1503,16 @@ window.updateSim = function (dt) {
                 if (tr._slotTotal > 1) tr._journeyTime = (tr._journeyTime || 0) + dtSec;
                 if (tr.dwellTimer <= 0) {
                     tr._stationArrived = false; // reset arrival guard for next stop
+
+                    // Mid-route turnaround: dwell was the wait; now reverse in-place.
+                    if (tr._turnaroundAfterDwell) {
+                        tr._turnaroundAfterDwell = false;
+                        tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
+                        tr._route = null; tr._routeKey = null; tr._pathCache = null;
+                        tr.state = 'TURNAROUND_REVERSE';
+                        // fall through to next tick — TURNAROUND_REVERSE handles the rest
+                        return;
+                    }
                     let stations = lObj[tr.dirPhase].stations;
                     if (tr.nextStationIdx >= stations.length) {
                         // ── Reached the terminal station ──────────────────────────
@@ -1553,12 +1563,14 @@ window.updateSim = function (dt) {
                                     a.trackIds.some(tid => _curTids.includes(String(tid)))
                                 );
                                 if (_inPlaceTA) {
-                                    // Already on the turnaround area — reverse immediately.
+                                    // Already on the turnaround area and just finished dwelling —
+                                    // reverse immediately; the dwell was the pause.
+                                    tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
                                     tr._turnaroundTarget = { areaId: _inPlaceTA.id, trackIds: _inPlaceTA.trackIds, approachPath: [] };
                                     tr._terminalTurnaround = false;
                                     tr._resumeDepotReturn = true;
-                                    tr.state = 'TURNAROUND_WAIT';
-                                    tr._turnaroundWaitTimer = 5.0 + Math.random() * 3.0;
+                                    tr._route = null; tr._routeKey = null; tr._pathCache = null;
+                                    tr.state = 'TURNAROUND_REVERSE';
                                 } else {
                                     // Drive forward into a turnaround area, then reverse.
                                     let _fwdTA = _lastSeg
@@ -1688,15 +1700,16 @@ window.updateSim = function (dt) {
                                     );
 
                                     if (inPlaceTA) {
-                                        // Already on the turnaround area — reverse immediately.
+                                        // Already on the turnaround area and just finished dwelling —
+                                        // the dwell time was the passenger exchange; reverse in-place
+                                        // immediately without an extra TURNAROUND_WAIT pause.
+                                        tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
                                         tr._turnaroundTarget = { areaId: inPlaceTA.id, trackIds: inPlaceTA.trackIds, approachPath: [] };
-                                        tr._route = null; tr._routeKey = null; // clear route on new turnaround target
-                                        tr._terminalTurnaround = true; // TURNAROUND_REVERSE must flip dirPhase
+                                        tr._terminalTurnaround = true;
                                         tr._pendingNewDir = newDir;
                                         tr._pendingNextStationIdx = 0;
-                                        tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
-                                        tr.state = 'TURNAROUND_WAIT';
-                                        tr._turnaroundWaitTimer = 5.0 + Math.random() * 3.0;
+                                        tr._route = null; tr._routeKey = null; tr._pathCache = null;
+                                        tr.state = 'TURNAROUND_REVERSE';
                                     } else {
                                         // Case 2 — FORWARD TURNAROUND AREA:
                                         // Check if there is a turnaround area the train must
@@ -1841,8 +1854,36 @@ window.updateSim = function (dt) {
 
                 if (_taTransition) {
                     tr.speed = 0;
-                    tr.state = 'TURNAROUND_WAIT';
-                    tr._turnaroundWaitTimer = 5.0 + Math.random() * 3.0; // 5–8 second realistic wait
+                    // If this turnaround area is also a station platform, dwell for
+                    // passenger exchange and reverse at the END of the dwell — no
+                    // separate TURNAROUND_WAIT pause on top.
+                    // A pure (non-platform) TA still uses TURNAROUND_WAIT.
+                    let _taAsPlatform = null;
+                    if (lObj) {
+                        let _allStations = [
+                            ...(lObj.inbound && lObj.inbound.stations ? lObj.inbound.stations : []),
+                            ...(lObj.outbound && lObj.outbound.stations ? lObj.outbound.stations : []),
+                        ];
+                        _taAsPlatform = _allStations.find(st => {
+                            let resolved = window.selectActiveStation ? window.selectActiveStation(st) : st;
+                            return resolved && resolved.trackIds.some(tid => ta.trackIds.includes(String(tid)));
+                        });
+                        if (_taAsPlatform && window.selectActiveStation) _taAsPlatform = window.selectActiveStation(_taAsPlatform);
+                    }
+                    if (_taAsPlatform) {
+                        // Dwell here (passengers), then TURNAROUND_REVERSE on dwell exit.
+                        tr._turnaroundAfterDwell = true;
+                        tr.state = 'DWELLING';
+                        tr.dwellTimer = _taAsPlatform.dwell || 30;
+                        // Advance station index so the sequence stays correct.
+                        if (!tr._stationArrived) {
+                            tr._stationArrived = true;
+                            tr.nextStationIdx++;
+                        }
+                    } else {
+                        tr.state = 'TURNAROUND_WAIT';
+                        tr._turnaroundWaitTimer = 5.0 + Math.random() * 3.0; // 5–8 s realistic wait
+                    }
                 }
 
             } else if (tr.state === 'TURNAROUND_WAIT') {
