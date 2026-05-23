@@ -253,15 +253,14 @@ window._trackOutwardTangentAtPos = _outwardTangent;
 //
 // Returns: [{trackId, fromNode, toNode, dist, timeCost, speedKmh}] or null
 // ---------------------------------------------------------------------------
-window.computeFullPath = function (graph, startNodeId, targetTrackIds, incomingTrackId, allowSharpTurns, turnaroundAreaTrackIds) {
+window.computeFullPath = function (graph, startNodeId, targetTrackIds, incomingTrackId, allowSharpTurns, excludeTrackSet) {
     let tIds = Array.isArray(targetTrackIds)
         ? new Set(targetTrackIds.map(String))
         : new Set([String(targetTrackIds)]);
-    // allowSharpTurns is now ONLY respected for tracks inside designated turnaround areas.
-    // General routing never allows sharp turns (>120°) or 180° U-turns.
-    let taAreaSet = turnaroundAreaTrackIds
-        ? new Set(turnaroundAreaTrackIds.map(String))
-        : new Set((window.turnaroundAreas || []).flatMap(a => a.trackIds.map(String)));
+    allowSharpTurns = !!allowSharpTurns;
+    // excludeTrackSet: optional Set of track IDs to skip (used to avoid routing through
+    // turnaround-area tracks when the target itself is a TA platform).
+    // The target platform tracks are always allowed regardless.
 
     let distMap = new Map();  // stateKey → best timeCost so far
     let prev = new Map();  // stateKey → {fromNode, fromTrack, fromSk, edge}
@@ -288,16 +287,18 @@ window.computeFullPath = function (graph, startNodeId, targetTrackIds, incomingT
         for (let edge of edges) {
             let eTidStr = String(edge.trackId);
 
-            // Never U-turn on the same track (180° flip) — absolute ban regardless of TA
+            // Never U-turn on the same track
             if (u.lastTrackId && eTidStr === String(u.lastTrackId)) continue;
 
-            // Turn filter — sharp turns (>120°) only allowed on turnaround-area tracks
-            if (inTrack && nodePos) {
+            // Skip excluded tracks unless they are the target platform tracks
+            if (excludeTrackSet && excludeTrackSet.has(eTidStr) && !tIds.has(eTidStr)) continue;
+
+            // Turn filter
+            if (!allowSharpTurns && inTrack && nodePos) {
                 let outTrack = (window.tracks || []).find(t => t.id.toString() === eTidStr);
                 if (outTrack) {
                     let dev = _turnDeviation(inTrack, outTrack, nodePos);
-                    let isInTA = taAreaSet.has(eTidStr) || taAreaSet.has(String(u.lastTrackId || ''));
-                    if (dev > SHARP_ANGLE_THRESHOLD && !(allowSharpTurns && isInTA)) continue;
+                    if (dev > SHARP_ANGLE_THRESHOLD) continue;
                 }
             }
 
@@ -347,17 +348,17 @@ window.computeFullPath = function (graph, startNodeId, targetTrackIds, incomingT
 };
 
 // Strict path (no sharp turns). Returns null if impossible (caller should use turnaround).
-// NEVER falls back to allowSharpTurns=true for general routing — sharp turns are banned on open track.
 window.computePathStrict = function (graph, startNodeId, targetTrackIds, incomingTrackId) {
-    let strict = window.computeFullPath(graph, startNodeId, targetTrackIds, incomingTrackId, false, null);
+    let strict = window.computeFullPath(graph, startNodeId, targetTrackIds, incomingTrackId, false);
     if (strict) return { path: strict, forcedSharpTurn: false };
+    let loose = window.computeFullPath(graph, startNodeId, targetTrackIds, incomingTrackId, true);
+    if (loose) return { path: loose, forcedSharpTurn: true };
     return null;
 };
 
 // Single-step version (used by legacy callers)
-// allowSharpTurns only applies inside turnaround-area tracks; general routing never allows it.
 window.findNextTrack = function (graph, startNodeId, targetTrackIds, incomingTrackId, allowSharpTurns) {
-    let path = window.computeFullPath(graph, startNodeId, targetTrackIds, incomingTrackId, !!allowSharpTurns, null);
+    let path = window.computeFullPath(graph, startNodeId, targetTrackIds, incomingTrackId, !!allowSharpTurns);
     if (!path || path.length === 0) return null;
     let first = path[0];
     let edges = graph.get(startNodeId) || [];
@@ -402,13 +403,11 @@ window.findTurnaroundArea = function (graph, startNodeId, incomingTrackId, train
         let edges = graph.get(u.id) || [];
         for (let edge of edges) {
             let eTidStr = String(edge.trackId);
-            // Absolute ban: never U-turn on the same track (180° flip)
             if (u.lastTrackId && eTidStr === String(u.lastTrackId)) continue;
 
-            // Allow sharp turns INTO area tracks; enforce on approach outside area
+            // Allow sharp turns INTO area; enforce them on approach
             let isAreaEdge = areaTrackSet.has(eTidStr);
-            let isFromArea = areaTrackSet.has(String(u.lastTrackId || ''));
-            if (!isAreaEdge && !isFromArea && inTrack && nodePos) {
+            if (!isAreaEdge && inTrack && nodePos) {
                 let outTrack = (window.tracks || []).find(t => t.id.toString() === eTidStr);
                 if (outTrack && _turnDeviation(inTrack, outTrack, nodePos) > SHARP_ANGLE_THRESHOLD) continue;
             }
@@ -486,8 +485,8 @@ window.spawnTrainOnLine = function (line, dir, depot, g) {
             if (externalEdges.length === 0) continue; // dead end inside depot
 
             // Pathfind from exit node to first station (no incoming restriction: first step out of depot)
-            let path = window.computeFullPath(g, exitNode, firstStationTids, null, false, null);
-            if (!path) path = window.computeFullPath(g, exitNode, firstStationTids, null, true, firstStationTids);
+            let path = window.computeFullPath(g, exitNode, firstStationTids, null, false);
+            if (!path) path = window.computeFullPath(g, exitNode, firstStationTids, null, true);
             if (!path) continue;
 
             let totalCost = e.timeCost + path.reduce((s, p) => s + p.timeCost, 0);
@@ -574,33 +573,13 @@ window.extendTrainHistory = function (train, g, targetStation) {
     let lastSeg = train.history[train.history.length - 1];
     if (!lastSeg || !lastSeg.track) return;
 
-    // ── Already on platform: load remaining platform tracks, then plan ahead ──
+    // ── Already on platform: load any remaining platform tracks ──────────────
     if (platIds.includes(lastSeg.track.id.toString())) {
         _loadRemainingPlatformTracks(train, g, platIds);
-
-        // Only trigger turnaround if this platform is a designated turnaround area
-        // AND there is no forward path to the next station without reversing.
-        // A platform being in a TA does NOT mean the train must always reverse there.
-        if (!train._turnaroundTarget && !train._justReversed) {
-            let loaded = new Set(
-                train.history.filter(h => h.track && platIds.includes(h.track.id.toString()))
-                    .map(h => h.track.id.toString())
-            );
-            if (platIds.every(id => loaded.has(id))) {
-                let platTA = (window.turnaroundAreas || []).find(a =>
-                    a.trackIds.some(tid => loaded.has(String(tid))));
-                if (platTA) {
-                    // Only trigger reversal if there is truly no forward path to next station.
-                    // Look up what the next station after this one would be.
-                    let needsReversal = _checkIfReversalNeededAfterPlatform(train, g, platIds, lastSeg);
-                    if (needsReversal) {
-                        train._turnaroundTarget = { areaId: platTA.id, trackIds: platTA.trackIds, approachPath: [] };
-                        train._needsTurnaround = false;
-                    }
-                    // If no reversal needed, continue past the platform normally.
-                }
-            }
-        }
+        // Do NOT auto-trigger turnaround here just because the platform is a TA.
+        // The train may continue forward to the next station without reversing.
+        // Turnaround is only needed if there is genuinely no forward path — that
+        // decision is made at the terminal dwell or in the no-route branch below.
         return;
     }
 
@@ -614,14 +593,58 @@ window.extendTrainHistory = function (train, g, targetStation) {
     let freshSpawn = train._spawnTicks > 0;
     let inCooldown = (train._turnaroundCooldown || 0) > 0;
     let incomingTid = (freshSpawn || inCooldown) ? null : lastSeg.track.id;
-    // Sharp turns are NEVER allowed in general routing (only inside TA tracks).
-    // The cooldown suppresses the incoming-track check but not the turn-angle filter.
-    let allowSharp = false;
+    let allowSharp = freshSpawn || inCooldown;
 
     // ── Compute / reuse cached route ──────────────────────────────────────────
-    let routeKey = `${lastSeg.toNode}|${incomingTid}|${platIds.join(',')}`;
+    let routeKey = `${lastSeg.toNode}|${incomingTid}|${platIds.join(',')}|${allowSharp ? 1 : 0}`;
     if (!train._route || train._routeKey !== routeKey) {
-        let path = window.computeFullPath(g, lastSeg.toNode, platIds, incomingTid, false, null);
+        // Build the set of all turnaround-area track IDs.
+        // Turnaround areas must NEVER be used as routing shortcuts — they are only
+        // entered intentionally for reversals.  Exclude them from all normal routing
+        // EXCEPT when the target platform tracks are themselves part of a TA (in
+        // which case those specific tracks are allowed as the destination).
+        let taTrackSet = new Set((window.turnaroundAreas || []).flatMap(a => a.trackIds.map(String)));
+        // Build exclude set: all TA tracks that are NOT the target platform
+        let excludeSet = taTrackSet.size > 0
+            ? new Set([...taTrackSet].filter(id => !platIds.includes(id)))
+            : null;
+
+        let path = window.computeFullPath(g, lastSeg.toNode, platIds, incomingTid, allowSharp, excludeSet);
+        if (!path && !allowSharp)
+            path = window.computeFullPath(g, lastSeg.toNode, platIds, incomingTid, true, excludeSet);
+        // Last resort: try without exclusion in case the only path runs through a TA
+        // (e.g. depot exit that overlaps a TA) — this is rare but should not deadlock.
+        if (!path)
+            path = window.computeFullPath(g, lastSeg.toNode, platIds, incomingTid, allowSharp);
+        if (!path && !allowSharp)
+            path = window.computeFullPath(g, lastSeg.toNode, platIds, incomingTid, true);
+
+        // SHARP-TURN GEOMETRY GUARD:
+        // computeFullPath with allowSharpTurns=true may return a path whose very first
+        // step requires a physical sharp turn or U-turn from the train's current position.
+        // Such a path cannot be driven without teleporting the train — discard it so the
+        // turnaround-area search runs instead (the caller will set _needsTurnaround or
+        // _turnaroundTarget, which triggers TURNAROUND_APPROACH).
+        //
+        // We skip this check when:
+        //   • allowSharp is already true (spawn/cooldown grace — turn checks are relaxed)
+        //   • incomingTid is null (no prior track yet — first segment from depot)
+        //   • the path was found WITHOUT needing allowSharpTurns (no issue)
+        if (!allowSharp && incomingTid && path && path.length > 0) {
+            let inTrack = (window.tracks || []).find(t => t.id.toString() === String(incomingTid));
+            let firstStep = path[0];
+            let outTrack = (window.tracks || []).find(t => t.id.toString() === String(firstStep.trackId));
+            let nodePos = _nodePos(lastSeg.toNode);
+            if (inTrack && outTrack && nodePos) {
+                let dev = _turnDeviation(inTrack, outTrack, nodePos);
+                if (dev > SHARP_ANGLE_THRESHOLD) {
+                    // First step is a sharp/U-turn in geometry — this path is physically
+                    // impossible without a turnaround. Discard it.
+                    path = null;
+                }
+            }
+        }
+
         train._route = path || null;
         train._routeKey = routeKey;
         train._routePos = 0;
@@ -681,39 +704,46 @@ window.extendTrainHistory = function (train, g, targetStation) {
         .map(h => h.track.id.toString());
     let inPlaceTA = (window.turnaroundAreas || []).find(a =>
         a.trackIds.some(tid => bodyTids.includes(String(tid))));
+
+    // Only trigger in-place TA if there really is no forward path to the target.
+    // If the train is on a TA platform but can continue forward without reversing,
+    // do nothing here — the route computation above will handle it next tick.
     if (inPlaceTA) {
-        train._turnaroundTarget = { areaId: inPlaceTA.id, trackIds: inPlaceTA.trackIds, approachPath: [] };
+        // A strict (no-sharp-turn) forward path is needed to skip the in-place TA reversal.
+        // A loose path (allowSharpTurns=true) whose first step is geometrically impossible
+        // would cause the train to execute a physical sharp turn — treat that as no path.
+        let _fwdStrict = window.computeFullPath(g, lastSeg.toNode, platIds, lastSeg.track.id, false);
+        let _fwdLoose = !_fwdStrict && window.computeFullPath(g, lastSeg.toNode, platIds, lastSeg.track.id, true);
+        let forwardPath = _fwdStrict || null;
+        if (!forwardPath && _fwdLoose && _fwdLoose.length > 0) {
+            // Validate that the first step is not a physical sharp turn
+            let _inT = (window.tracks || []).find(t => t.id.toString() === String(lastSeg.track.id));
+            let _outT = (window.tracks || []).find(t => t.id.toString() === String(_fwdLoose[0].trackId));
+            let _np = _nodePos(lastSeg.toNode);
+            if (_inT && _outT && _np) {
+                let _dev = _turnDeviation(_inT, _outT, _np);
+                if (_dev <= SHARP_ANGLE_THRESHOLD) forwardPath = _fwdLoose;
+            } else {
+                forwardPath = _fwdLoose; // can't check geometry, give benefit of doubt
+            }
+        }
+        if (!forwardPath) {
+            train._turnaroundTarget = { areaId: inPlaceTA.id, trackIds: inPlaceTA.trackIds, approachPath: [] };
+            train._needsTurnaround = false;
+            return;
+        }
+        // Forward path exists — clear any stale turnaround target and let routing proceed
+        train._turnaroundTarget = null;
         train._needsTurnaround = false;
         return;
     }
 
     if (!inCooldown) {
-        // Only use a turnaround area if the target is genuinely unreachable without reversal.
-        // Check if target can be reached via a TA (mid-route turnaround) before giving up.
         let taResult = window.findTurnaroundArea(g, lastSeg.toNode, lastSeg.track.id, train.trainLength);
         if (taResult) {
-            // Verify that after going through the TA we can actually reach the target.
-            // If yes, drive to the TA to reverse; if not, the layout is broken.
-            let taAreaSet = new Set(taResult.trackIds.map(String));
-            let taNodes = [];
-            for (let [nid, edges] of g) {
-                if (edges.some(e => taAreaSet.has(String(e.trackId)))) taNodes.push(nid);
-            }
-            let postTAReachable = taNodes.some(n => {
-                let p = window.computeFullPath(g, n, platIds, null, true, taResult.trackIds);
-                return !!p;
-            });
-            if (postTAReachable) {
-                train._turnaroundTarget = taResult;
-                train._needsTurnaround = false;
-                _extendTowardTurnaround(train, g);
-            } else {
-                if (!train._noPathLogged) {
-                    console.warn('[SIM] No path/turnaround for train', train.id, 'at node', lastSeg.toNode);
-                    train._noPathLogged = true;
-                }
-                train._needsTurnaround = true;
-            }
+            train._turnaroundTarget = taResult;
+            train._needsTurnaround = false;
+            _extendTowardTurnaround(train, g);
         } else {
             if (!train._noPathLogged) {
                 console.warn('[SIM] No path/turnaround for train', train.id, 'at node', lastSeg.toNode);
@@ -723,49 +753,6 @@ window.extendTrainHistory = function (train, g, targetStation) {
         }
     }
 };
-
-// Helper: check if reversal is actually needed after stopping at a platform.
-// Returns true only if there is no forward (no-sharp-turn) path to the station
-// AFTER the current target (the next one in sequence).
-function _checkIfReversalNeededAfterPlatform(train, g, curPlatIds, lastSeg) {
-    // Find the line object to look up the next station after the current one.
-    let lObj = (window.sim && window.sim.lines
-        ? window.sim.lines.find(l => l.id === train.lineId)
-        : null);
-    if (!lObj) return true; // can't check — assume reversal needed
-
-    let stations = lObj[train.dirPhase] && lObj[train.dirPhase].stations;
-    if (!stations) return true;
-
-    // nextStationIdx is the current target — the one AFTER it is what we look ahead to.
-    let peekIdx = (train.nextStationIdx || 0) + 1;
-    if (peekIdx >= stations.length) {
-        // This IS the terminal — check if next direction's first station is reachable forward.
-        let newDir = train.dirPhase === 'inbound' ? 'outbound' : 'inbound';
-        let newStations = lObj[newDir] && lObj[newDir].stations;
-        if (!newStations || newStations.length === 0) return true;
-        let nextTids = newStations[0].trackIds.map(String);
-        // Try forward path from end of platform
-        let exitNode = lastSeg.toNode;
-        let fwdPath = window.computeFullPath(g, exitNode, nextTids, lastSeg.track.id, false, null);
-        // If forward path exists and doesn't require going through a TA to reverse, no reversal needed.
-        if (fwdPath) {
-            let taAreaIds = new Set((window.turnaroundAreas || []).flatMap(a => a.trackIds.map(String)));
-            let usesTA = fwdPath.some(step => taAreaIds.has(String(step.trackId)));
-            if (!usesTA) return false; // can proceed without reversal
-        }
-        return true; // need reversal
-    }
-
-    // Mid-route: check if we can reach the NEXT station without reversal.
-    let nextSt = window.selectActiveStation ? window.selectActiveStation(stations[peekIdx]) : stations[peekIdx];
-    if (!nextSt) return true;
-    let nextTids = nextSt.trackIds.map(String);
-    let exitNode = lastSeg.toNode;
-    let fwdPath = window.computeFullPath(g, exitNode, nextTids, lastSeg.track.id, false, null);
-    if (fwdPath) return false; // forward path exists — no reversal needed
-    return true; // no forward path — reversal needed
-}
 
 // Load remaining multi-track platform segments (O(1) edge lookup, no Dijkstra)
 function _loadRemainingPlatformTracks(train, g, platIds) {
@@ -907,29 +894,29 @@ function _extendTowardDepot(train, g, depotStation) {
 
         let inCooldown = (train._turnaroundCooldown || 0) > 0;
         let incomingTid = inCooldown ? null : lastSeg.track.id;
-        // Sharp turns are never allowed in general routing; no fallback to allowSharpTurns=true.
-        let nextStep = window.findNextTrack(g, lastSeg.toNode, platIds, incomingTid, false);
+        // Returning trains retrace their outbound path; try strict routing first,
+        // then allow sharp turns before considering any turnaround.
+        let nextStep = window.findNextTrack(g, lastSeg.toNode, platIds, incomingTid, false)
+            || window.findNextTrack(g, lastSeg.toNode, platIds, incomingTid, true);
 
         if (!nextStep) {
             if (inCooldown && (train._turnaroundCooldown || 0) >= 2) {
                 train._turnaroundCooldown = 0; inCooldown = false;
             }
             if (!inCooldown) {
-                // Only trigger a turnaround if the depot is truly unreachable from here.
-                let depotReachable = !!(
-                    window.computeFullPath(g, lastSeg.toNode, platIds, null, false, null)
-                );
-                if (!depotReachable) {
-                    let ta = window.findTurnaroundArea(g, lastSeg.toNode, lastSeg.track.id, train.trainLength);
-                    if (ta) {
-                        train._turnaroundTarget = ta;
-                        train._needsTurnaround = false;
-                        _extendTowardTurnaround(train, g);
-                    } else {
-                        train._needsTurnaround = true;
-                    }
+                // No forward path exists from the current heading/incoming-track.
+                // Always search for a turnaround area — even if the target is reachable
+                // from a different heading (that heading is physically inaccessible without
+                // first reversing via a turnaround area).
+                let ta = window.findTurnaroundArea(g, lastSeg.toNode, lastSeg.track.id, train.trainLength);
+                if (ta) {
+                    train._turnaroundTarget = ta;
+                    train._needsTurnaround = false;
+                    _extendTowardTurnaround(train, g);
+                } else {
+                    // No turnaround area available anywhere reachable — train is truly stuck.
+                    train._needsTurnaround = true;
                 }
-                // If depot is reachable, routing glitch — break and retry next tick.
             }
             break;
         }
@@ -983,8 +970,8 @@ window._checkConnectivity = function (targetTrackId) {
         let last = tr.history && tr.history[tr.history.length - 1];
         if (!last) return;
         let inReach = reachable.has(String(last.toNode));
-        let strict = window.computeFullPath(g, last.toNode, [tIdStr], last.track && last.track.id, false, null);
-        let loose = window.computeFullPath(g, last.toNode, [tIdStr], last.track && last.track.id, true, null);
+        let strict = window.computeFullPath(g, last.toNode, [tIdStr], last.track && last.track.id, false);
+        let loose = window.computeFullPath(g, last.toNode, [tIdStr], last.track && last.track.id, true);
         console.log('[CONNECTIVITY] Train', tr.id,
             '@ node', last.toNode,
             '| reachable:', inReach,

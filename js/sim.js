@@ -1225,15 +1225,27 @@ window.updateSim = function (dt) {
                     if (tr.history.length === _beforeLen) break;
                 }
 
-                // If extendTrainHistory found a turnaround area, switch to approach mode
+                // If extendTrainHistory found a turnaround area, switch to approach mode.
+                // Exception: if the TA tracks overlap with the current target platform,
+                // the train should brake to stop at the platform normally and do the
+                // reversal during dwell — not bypass the dwell to approach the TA.
                 if (tr._turnaroundTarget && tr.state !== 'TURNAROUND_APPROACH') {
-                    // For in-place turnarounds (approachPath empty), trim lookahead history
-                    // so _extendTowardTurnaround sees the area track as the last segment.
-                    if (tr._turnaroundTarget.approachPath && tr._turnaroundTarget.approachPath.length === 0) {
-                        tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
+                    let taIds = tr._turnaroundTarget.trackIds.map(String);
+                    let platOverlap = targetStation && targetStation.trackIds.some(id => taIds.includes(String(id)));
+                    if (platOverlap) {
+                        // Platform IS the TA — clear the TA flag, let the train dwell normally.
+                        // The DWELLING exit block will detect the overlap and perform turnaround there.
+                        tr._turnaroundTarget = null;
+                        tr._needsTurnaround = false;
+                    } else {
+                        // For in-place turnarounds (approachPath empty), trim lookahead history
+                        // so _extendTowardTurnaround sees the area track as the last segment.
+                        if (tr._turnaroundTarget.approachPath && tr._turnaroundTarget.approachPath.length === 0) {
+                            tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
+                        }
+                        tr.state = 'TURNAROUND_APPROACH';
+                        return;
                     }
-                    tr.state = 'TURNAROUND_APPROACH';
-                    return;
                 }
 
                 // If no path and no turnaround area available, brake and stop
@@ -1503,16 +1515,6 @@ window.updateSim = function (dt) {
                 if (tr._slotTotal > 1) tr._journeyTime = (tr._journeyTime || 0) + dtSec;
                 if (tr.dwellTimer <= 0) {
                     tr._stationArrived = false; // reset arrival guard for next stop
-
-                    // Mid-route turnaround: dwell was the wait; now reverse in-place.
-                    if (tr._turnaroundAfterDwell) {
-                        tr._turnaroundAfterDwell = false;
-                        tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
-                        tr._route = null; tr._routeKey = null; tr._pathCache = null;
-                        tr.state = 'TURNAROUND_REVERSE';
-                        // fall through to next tick — TURNAROUND_REVERSE handles the rest
-                        return;
-                    }
                     let stations = lObj[tr.dirPhase].stations;
                     if (tr.nextStationIdx >= stations.length) {
                         // ── Reached the terminal station ──────────────────────────
@@ -1563,14 +1565,20 @@ window.updateSim = function (dt) {
                                     a.trackIds.some(tid => _curTids.includes(String(tid)))
                                 );
                                 if (_inPlaceTA) {
-                                    // Already on the turnaround area and just finished dwelling —
-                                    // reverse immediately; the dwell was the pause.
+                                    // Already on the turnaround area — reverse in-place during dwell.
                                     tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
-                                    tr._turnaroundTarget = { areaId: _inPlaceTA.id, trackIds: _inPlaceTA.trackIds, approachPath: [] };
+                                    let _okTA = window.performTurnaround(tr);
+                                    if (!_okTA) { tr.state = 'DESPAWNING'; return; }
+                                    tr._turnaroundTarget = null;
                                     tr._terminalTurnaround = false;
-                                    tr._resumeDepotReturn = true;
+                                    tr._resumeDepotReturn = false;
                                     tr._route = null; tr._routeKey = null; tr._pathCache = null;
-                                    tr.state = 'TURNAROUND_REVERSE';
+                                    tr._noPathLogged = false; tr._needsTurnaround = false;
+                                    tr._justReversed = true;
+                                    tr._turnaroundCooldown = 3.0;
+                                    tr.speed = 0;
+                                    tr.state = 'RETURNING_TO_DEPOT';
+                                    tr._depotReturnAttempts = 0;
                                 } else {
                                     // Drive forward into a turnaround area, then reverse.
                                     let _fwdTA = _lastSeg
@@ -1638,28 +1646,14 @@ window.updateSim = function (dt) {
                                 // Can the train reach newStations[0] from its current
                                 // exit node WITHOUT a U-turn, sharp turn, OR traversal
                                 // through a player-defined turnaround area?
-                                //
-                                // If the only path to newStations[0] goes through a
-                                // turnaround area, the train must use TURNAROUND first
-                                // (flip dirPhase), then drive through the area in the
-                                // correct direction on the return leg.  Allowing such a
-                                // path here causes the train to drive forward through the
-                                // loop without a direction flip and emerge going the wrong
-                                // way, or to do a sharp turn instead of using the loop.
                                 let forwardReachable = false;
-                                // If current terminal platform is itself a turnaround area,
-                                // always require physical reversal — never skip it.
-                                let terminalTids = stations[stations.length - 1]
-                                    ? stations[stations.length - 1].trackIds.map(String) : [];
-                                let terminalIsTA = (window.turnaroundAreas || []).some(a =>
-                                    a.trackIds.some(tid => terminalTids.includes(String(tid))));
+                                let tAreaIds = new Set(
+                                    (window.turnaroundAreas || []).flatMap(a => a.trackIds.map(String))
+                                );
 
-                                if (!terminalIsTA && lastSeg) {
+                                if (lastSeg) {
                                     let exitNode = lastSeg.toNode;
                                     let incomingTid = lastSeg.track.id;
-                                    let tAreaIds = new Set(
-                                        (window.turnaroundAreas || []).flatMap(a => a.trackIds.map(String))
-                                    );
                                     let fwdPath = window.computeFullPath(g, exitNode, newFirstTids, incomingTid, false);
                                     if (fwdPath) {
                                         let usesTA = fwdPath.some(step => tAreaIds.has(String(step.trackId)));
@@ -1700,25 +1694,88 @@ window.updateSim = function (dt) {
                                     );
 
                                     if (inPlaceTA) {
-                                        // Already on the turnaround area and just finished dwelling —
-                                        // the dwell time was the passenger exchange; reverse in-place
-                                        // immediately without an extra TURNAROUND_WAIT pause.
+                                        // Already on the turnaround area — reverse in-place during dwell.
+                                        // The outbound terminal dwell is done; now perform the physical reversal.
                                         tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
-                                        tr._turnaroundTarget = { areaId: inPlaceTA.id, trackIds: inPlaceTA.trackIds, approachPath: [] };
-                                        tr._terminalTurnaround = true;
-                                        tr._pendingNewDir = newDir;
-                                        tr._pendingNextStationIdx = 0;
+                                        let ok = window.performTurnaround(tr);
+                                        if (!ok) { tr.state = 'DESPAWNING'; return; }
+                                        tr.dirPhase = newDir;
+                                        tr._turnaroundTarget = null;
+                                        tr._terminalTurnaround = false;
+                                        tr._pendingNewDir = null;
+                                        tr._pendingNextStationIdx = undefined;
                                         tr._route = null; tr._routeKey = null; tr._pathCache = null;
-                                        tr.state = 'TURNAROUND_REVERSE';
+                                        tr._noPathLogged = false; tr._needsTurnaround = false;
+                                        tr._justReversed = true;
+                                        tr._turnaroundCooldown = 3.0;
+                                        tr.speed = 0;
+                                        tr._stationArrived = false;
+
+                                        // Check if station[0] of the new direction is the same
+                                        // platform we just reversed on. If so, dwell there now
+                                        // (the train is already stopped here, serving passengers
+                                        // in the new direction before departing).
+                                        // This ensures the first stop of the new direction is
+                                        // never skipped, even when it coincides with the terminal.
+                                        let newStsCheck = lObj[newDir] && lObj[newDir].stations;
+                                        let dwellHere = false;
+                                        if (newStsCheck && newStsCheck.length > 0) {
+                                            let firstTids = newStsCheck[0].trackIds.map(String);
+                                            let bodyTidsNow = tr.history
+                                                .filter(h => h.track && h.endDist > tr.headDist - tr.trainLength && h.startDist <= tr.headDist)
+                                                .map(h => h.track.id.toString());
+                                            if (firstTids.some(id => bodyTidsNow.includes(id))) {
+                                                dwellHere = true;
+                                            }
+                                        }
+                                        if (dwellHere) {
+                                            // Dwell at station[0] of new direction before departing.
+                                            tr._stationArrived = true;
+                                            tr.nextStationIdx = 1; // will be advanced past station[0]
+                                            tr.state = 'DWELLING';
+                                            tr.dwellTimer = newStsCheck[0].dwell || 30;
+                                        } else {
+                                            tr.nextStationIdx = 0;
+                                            tr.state = 'DRIVING';
+                                        }
                                     } else {
                                         // Case 2 — FORWARD TURNAROUND AREA:
-                                        // Check if there is a turnaround area the train must
-                                        // drive INTO before reversing (area is ahead of the
-                                        // current head position).
+                                        // Only drive into a forward turnaround area if that area
+                                        // is actually necessary to reach the new direction's first
+                                        // station — i.e. after reversing inside the area the train
+                                        // can reach newStations[0], but a simple in-place flip
+                                        // from the current position cannot reach it.
+                                        //
+                                        // Without this guard, findTurnaroundArea returns ANY
+                                        // reachable TA on the map (including ones belonging to
+                                        // other lines), causing the train to drive kilometres in
+                                        // the wrong direction instead of just flipping in place.
                                         let forwardTA = null;
                                         if (lastSeg) {
-                                            forwardTA = window.findTurnaroundArea(
+                                            let candidateTA = window.findTurnaroundArea(
                                                 g, lastSeg.toNode, lastSeg.track.id, tr.trainLength);
+                                            if (candidateTA) {
+                                                // Verify: after reversing inside this TA, can the
+                                                // train actually reach newStations[0]?
+                                                // Simulate the exit node of the TA (last area track's
+                                                // far end) and check reachability to newFirstTids.
+                                                let taTrackIds = candidateTA.trackIds.map(String);
+                                                let taReachesNewDir = false;
+                                                for (let taTid of taTrackIds) {
+                                                    let taTrk = (window.tracks || []).find(t => t.id.toString() === taTid);
+                                                    if (!taTrk) continue;
+                                                    // After reversing: both endpoints become candidate exit nodes
+                                                    for (let exitNode of [taTrk.start.id || taTrk.start, taTrk.end.id || taTrk.end]) {
+                                                        let exitNodeId = exitNode && exitNode.id !== undefined ? exitNode.id : exitNode;
+                                                        if (!exitNodeId) continue;
+                                                        let pathAfterRev = window.computeFullPath(g, exitNodeId, newFirstTids, taTid, false)
+                                                            || window.computeFullPath(g, exitNodeId, newFirstTids, taTid, true);
+                                                        if (pathAfterRev) { taReachesNewDir = true; break; }
+                                                    }
+                                                    if (taReachesNewDir) break;
+                                                }
+                                                if (taReachesNewDir) forwardTA = candidateTA;
+                                            }
                                         }
                                         if (forwardTA) {
                                             // Drive forward into the turnaround area, THEN reverse.
@@ -1730,9 +1787,9 @@ window.updateSim = function (dt) {
                                             tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
                                             tr.state = 'TURNAROUND_APPROACH';
                                         } else {
-                                            // Case 3 — No turnaround area found at all.
-                                            // Immediate in-place flip; extendTrainHistory may
-                                            // discover a behind-terminal area on the next tick.
+                                            // Case 3 — No applicable turnaround area found.
+                                            // Immediate in-place flip; extendTrainHistory will then
+                                            // route toward newStations[0] from the reversed heading.
                                             tr.state = 'TURNAROUND';
                                         }
                                     }
@@ -1854,35 +1911,33 @@ window.updateSim = function (dt) {
 
                 if (_taTransition) {
                     tr.speed = 0;
-                    // If this turnaround area is also a station platform, dwell for
-                    // passenger exchange and reverse at the END of the dwell — no
-                    // separate TURNAROUND_WAIT pause on top.
-                    // A pure (non-platform) TA still uses TURNAROUND_WAIT.
-                    let _taAsPlatform = null;
-                    if (lObj) {
-                        let _allStations = [
-                            ...(lObj.inbound && lObj.inbound.stations ? lObj.inbound.stations : []),
-                            ...(lObj.outbound && lObj.outbound.stations ? lObj.outbound.stations : []),
-                        ];
-                        _taAsPlatform = _allStations.find(st => {
-                            let resolved = window.selectActiveStation ? window.selectActiveStation(st) : st;
-                            return resolved && resolved.trackIds.some(tid => ta.trackIds.includes(String(tid)));
-                        });
-                        if (_taAsPlatform && window.selectActiveStation) _taAsPlatform = window.selectActiveStation(_taAsPlatform);
-                    }
-                    if (_taAsPlatform) {
-                        // Dwell here (passengers), then TURNAROUND_REVERSE on dwell exit.
-                        tr._turnaroundAfterDwell = true;
+
+                    // Check if the turnaround area track is also a station platform.
+                    // If so, dwell for the proper station dwell time and advance
+                    // nextStationIdx, then reverse — no separate TURNAROUND_WAIT.
+                    let stations = lObj[tr.dirPhase].stations;
+                    let taIds = ta.trackIds.map(String);
+                    let matchingStation = stations && stations[tr.nextStationIdx];
+                    let taIsStation = matchingStation &&
+                        matchingStation.trackIds.some(id => taIds.includes(String(id)));
+
+                    if (taIsStation) {
+                        // Arrived at a platform that is also a TA.
+                        // Dwell for station time, then reverse inside DWELLING exit.
                         tr.state = 'DWELLING';
-                        tr.dwellTimer = _taAsPlatform.dwell || 30;
-                        // Advance station index so the sequence stays correct.
+                        tr.dwellTimer = matchingStation.dwell || 30;
                         if (!tr._stationArrived) {
                             tr._stationArrived = true;
                             tr.nextStationIdx++;
                         }
+                        tr.history = tr.history.filter(h => h.startDist <= tr.headDist + 1);
+                        tr._route = null; tr._routeKey = null; tr._pathCache = null;
+                        // Mark that upon dwell completion a turnaround is needed in-place.
+                        // The DWELLING exit will detect this via the inPlaceTA check.
                     } else {
+                        // Pure turnaround area (not a station) — brief realistic wait then reverse.
                         tr.state = 'TURNAROUND_WAIT';
-                        tr._turnaroundWaitTimer = 5.0 + Math.random() * 3.0; // 5–8 s realistic wait
+                        tr._turnaroundWaitTimer = 5.0 + Math.random() * 3.0;
                     }
                 }
 
@@ -1911,10 +1966,11 @@ window.updateSim = function (dt) {
                     tr.dirPhase = tr._pendingNewDir || (tr.dirPhase === 'inbound' ? 'outbound' : 'inbound');
                     let pendingIdx = tr._pendingNextStationIdx !== undefined ? tr._pendingNextStationIdx : 0;
 
-                    // If station[pendingIdx] of the new direction is the turnaround area the
-                    // train is currently sitting on (platform == turnaround area), skip it.
-                    // Without this, extendTrainHistory sees the train on the target platform
-                    // and re-triggers the turnaround, causing an oscillation loop.
+                    // If station[0] of the new direction is the turnaround area the
+                    // train is currently sitting on, dwell there (serving passengers
+                    // in the new direction) rather than silently skipping it.
+                    let dwellAtFirst = false;
+                    let firstStDwell = 30;
                     if (pendingIdx === 0) {
                         let newSts = lObj[tr.dirPhase] && lObj[tr.dirPhase].stations;
                         if (newSts && newSts.length > 0) {
@@ -1922,7 +1978,11 @@ window.updateSim = function (dt) {
                             let bodyTids = tr.history
                                 .filter(h => h.track && h.endDist > tr.headDist - tr.trainLength && h.startDist <= tr.headDist)
                                 .map(h => h.track.id.toString());
-                            if (firstTids.some(id => bodyTids.includes(id))) pendingIdx = 1;
+                            if (firstTids.some(id => bodyTids.includes(id))) {
+                                dwellAtFirst = true;
+                                firstStDwell = newSts[0].dwell || 30;
+                                pendingIdx = 1; // advance past station[0] after this dwell
+                            }
                         }
                     }
 
@@ -1930,6 +1990,14 @@ window.updateSim = function (dt) {
                     tr._terminalTurnaround = false;
                     tr._pendingNewDir = null;
                     tr._pendingNextStationIdx = undefined;
+
+                    if (dwellAtFirst) {
+                        // Dwell at the first station of new direction (same as the TA we reversed on).
+                        tr._stationArrived = true; // already counted above (pendingIdx = 1)
+                        tr.state = 'DWELLING';
+                        tr.dwellTimer = firstStDwell;
+                        return; // skip the DRIVING transition below
+                    }
                 }
 
                 // After reversal, clear the route cache so extendTrainHistory
